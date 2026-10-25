@@ -1,0 +1,15 @@
+# Required
+PySide6>=6.6
+Pillow
+numpy
+
+# Collecting images from the web
+playwright
+playwright-stealth
+requests
+beautifulsoup4
+
+# Optional: AI upscaling and low-quality detection (large downloads)
+# torch
+# spandrel
+# transformers

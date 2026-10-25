@@ -1,4 +1,5 @@
 # Dataset Manager
+<img width="1128" height="919" alt="Untitled" src="https://github.com/user-attachments/assets/4b9dc87f-a9c5-4f10-ad84-1b072f966c52" />
 
 Collect, organize, caption and de-duplicate image datasets. A native Qt 6 desktop app that follows your
 desktop theme on KDE Plasma and GNOME.

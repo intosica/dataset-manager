@@ -7,7 +7,7 @@
 <p align="center">Collect, organize, caption and de-duplicate image datasets.<br>
 A native GNOME app (GTK 4 + libadwaita), also at home on COSMIC and other desktops.</p>
 
-<p align="center"><img width="1128" height="919" alt="Untitled" src="https://github.com/user-attachments/assets/4b9dc87f-a9c5-4f10-ad84-1b072f966c52" /></p>
+<p align="center"><img src="docs/screenshots/library.png" alt="Library page: collections with sizes and a preview grid of cat photos" width="1128"></p>
 
 ## Install
 
@@ -51,6 +51,13 @@ The pages are in the header bar (Ctrl+1 … Ctrl+5); the left sidebar holds your
 | Tag Tools | **Tag Editor**: browse a dataset, filter by tags, edit captions one by one or in batches, auto-tag (JTP Hydra 3.5, WD EVA02 Large v3) and caption with JoyCaption. **Imageboard Upload Helper**: turns tag lists into imageboard upload format |
 
 The window adapts to narrow sizes: the sidebar collapses and the page switcher moves to the bottom.
+
+| Tag Tools → Tag Editor | Collect |
+|---|---|
+| <img src="docs/screenshots/tag-editor.png" alt="Tag Editor: image grid, editable caption, batch tag edit" width="430"> | <img src="docs/screenshots/collect.png" alt="Collect page: source, search terms and filters" width="430"> |
+
+Screenshots use a small demo library of [CC0](https://creativecommons.org/publicdomain/zero/1.0/) cat photographs from
+Wikimedia Commons.
 
 ### Sessions
 

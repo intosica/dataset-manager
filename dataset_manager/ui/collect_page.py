@@ -84,8 +84,8 @@ class CollectPage(Gtk.Box):
         self.g_seed = Adw.PreferencesGroup(
             title="Find visually similar images",
             description="Uploads your seed image to the engine's “visually similar images” view and downloads those "
-                        "results: more images that look like it, not an identification of it. Can be combined "
-                        "with search terms.")
+                        "results: more images that look like it, not an identification of it. While a seed is set, "
+                        "only those results are downloaded; clear it to search by text again.")
         self.g_seed.add(self.seed)
         self.g_seed.add(self.seed_count)
 
@@ -168,6 +168,7 @@ class CollectPage(Gtk.Box):
                        (self.backend, "notify::selected"), (self.pos_dir, "changed"), (self.neg_dir, "changed"),
                        (self.threshold, "notify::value")]:
             w.connect(sig, self._edited)
+        self.seed.connect("changed", lambda _r: self._seed_changed())
         self.filters.changed.append(self._edited)
         self._source_changed()
         self._backend_changed()
@@ -260,6 +261,13 @@ class CollectPage(Gtk.Box):
         self.g_safe.set_visible(not artist and key not in NO_SAFE_SEARCH)
         self.g_seed.set_visible(key in SIMILAR_ENGINES)
         self.query.set_title("Artist name" if artist else "Search terms or URL")
+        self._seed_changed()
+
+    def _seed_changed(self) -> None:
+        """A seed image means visual search only, so the search terms have nothing left to do."""
+        seed = self.seed.get_text().strip() if self.g_seed.get_visible() else ""
+        self.query.set_visible(not seed)
+        self.name.set_title("Collection name" if seed else "Collection name (defaults to the search terms)")
 
     def _backend_changed(self, *_a) -> None:
         sel = self.backend.get_selected()
@@ -295,7 +303,7 @@ class CollectPage(Gtk.Box):
             self.panel.log("The seed is not an image file, a folder with images, or an http(s) image URL.")
             return
         opts = CollectOptions(
-            source=key, query=p["query"], collection_name=p["name"], limit=p["limit"], randomize=p["randomize"],
+            source=key, query="" if seeds else p["query"], collection_name=p["name"], limit=p["limit"], randomize=p["randomize"],
             parallel=p["parallel"], safe_search_off=p["safe_search_off"] and key not in NO_SAFE_SEARCH,
             filters={} if artist else self.filters.selection(), similarity=sim, seeds=seeds,
             sink=SinkOptions(min_side=p["min_side"], resize=p["resize"], target_dim=s.target_dim,

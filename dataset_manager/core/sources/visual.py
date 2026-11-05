@@ -5,9 +5,12 @@
 The seed (local path or http(s) URL) is always *uploaded* through the engine's file input (URL seeds are downloaded
 first): the engines' URL-based flows are unreliable (Bing's imgurl: link just bounces to the homepage).
 Verified engines (Playwright Chromium, no system Chrome needed):
+  Bing   - the upload lands on a web results page; the visual-match grid is /images/search?bcid=…&vsa=2, which keeps
+           loading more tiles as you scroll (hundreds of candidates).
   Bing   - works headless and headed. Headless Chromium is refused ("Unable to process this search") unless the
            'Headless' token is stripped from the user agent, which _humanize() does through CDP.
-  Yandex - works headless and headed in tests; it may show a robot check on heavy use (then we return what we have;
+  Yandex - 'Similar images' shows ~40 tiles, all visible at once (its 'Show more' button leaves the grid); scrolling
+           loads nothing more. Works headless and headed in tests; it may show a robot check on heavy use (then we return what we have;
            a real system Chrome via open_browser(prefer_system=True) and a headed window make that rarer).
 Google Lens is not offered: it is consent/bot blocked.
 Every failure is logged and yields [] (or the partial list) instead of raising.
@@ -15,11 +18,12 @@ Every failure is logged and yields [] (or the partial list) instead of raising.
 from __future__ import annotations
 
 import mimetypes
+import random
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .search import YANDEX_ITEM, YANDEX_JS, _auto_scroll, _wait_tiles
+from .search import YANDEX_ITEM, YANDEX_JS, _wait_tiles
 
 SIMILAR_ENGINES = ("Bing", "Yandex")
 
@@ -51,20 +55,64 @@ def _q(url: str, key: str) -> str:
     return (parse_qs(urlparse(url).query).get(key) or [""])[0]
 
 
+async def _click_more(page, selectors) -> None:
+    """Press a 'show / view / see more' control if there is one (they only exist on some layouts)."""
+    for sel in selectors:
+        try:
+            for el in await page.query_selector_all(sel):
+                if await el.is_visible():
+                    await el.scroll_into_view_if_needed(timeout=2000)
+                    await el.click(timeout=3000)
+                    return
+        except Exception:
+            pass
+
+
+async def _scroll_collect(page, extract, cap, ctx, more=()) -> list[str]:
+    """Scroll (and press 'more' buttons) until `cap` URLs are known or the list stops growing."""
+    best: list[str] = []
+    stagnant = 0
+    for _ in range(40):
+        if ctx.cancelled or page.is_closed():
+            break
+        try:
+            urls = list(dict.fromkeys(u for u in await extract() if u and u.startswith("http")))
+        except Exception:
+            urls = best                       # page navigated under us; keep what we have
+        if len(urls) > len(best):
+            best, stagnant = urls, 0
+        else:
+            stagnant += 1
+        if cap and len(best) >= cap:
+            break
+        if stagnant >= 4:
+            break
+        for _ in range(random.randint(3, 6)):
+            await page.evaluate("(d) => window.scrollBy(0, d)", random.randint(400, 900))
+            await page.wait_for_timeout(random.randint(120, 350))
+        await _click_more(page, more)
+        await page.wait_for_timeout(random.randint(700, 1500))
+    return best
+
+
 async def _bing(page, payload, cap, ctx):
     await page.goto("https://www.bing.com/images", wait_until="domcontentloaded")
     await page.click("#sb_sbi", timeout=15000)
     await page.set_input_files("input[type=file]", payload)
     try:
-        await page.wait_for_url(re.compile(r"/search\?.*(SBIIRP|bcid)"), timeout=30000)
+        await page.wait_for_url(re.compile(r"bcid="), timeout=30000)
     except Exception:
         ctx.log("Bing did not accept the image (still on the upload dialog).")
         return []
-    await page.goto(page.url + "&vsa=2", wait_until="domcontentloaded")      # the 'Visual Matches' tab
+    # the upload lands on a *web* results page; the visual-match grid lives on the images endpoint
+    await page.goto(f"https://www.bing.com/images/search?bcid={_q(page.url, 'bcid')}&vsa=2",
+                    wait_until="domcontentloaded")
     await page.wait_for_timeout(3000)
-    await _auto_scroll(page, "Bing", cap, ctx)
-    hrefs = await page.evaluate("() => [...document.querySelectorAll('a[href*=\"mediaurl=\"]')].map(a => a.href)")
-    return [_q(h, "mediaurl") or _q(h, "cdnurl") for h in hrefs]
+
+    async def extract():
+        hrefs = await page.evaluate("() => [...document.querySelectorAll('a[href*=\"mediaurl=\"]')].map(a => a.href)")
+        return [_q(h, "mediaurl") or _q(h, "cdnurl") for h in hrefs]
+    return await _scroll_collect(page, extract, cap, ctx, more=("a.btn_seemore",))
 
 
 async def _yandex(page, payload, cap, ctx):
@@ -80,12 +128,9 @@ async def _yandex(page, payload, cap, ctx):
     if not await _wait_tiles(page, 20):
         ctx.log("Yandex showed no similar images" + (" (robot check)" if "captcha" in page.url else "") + ".")
         return []
-    await _auto_scroll(page, "Yandex", cap, ctx)
-    try:
-        items = await page.evaluate(YANDEX_JS, YANDEX_ITEM)
-    except Exception:
-        return []
-    return [o or p for o, p in items]
+    async def extract():
+        return [o or p for o, p in await page.evaluate(YANDEX_JS, YANDEX_ITEM)]
+    return await _scroll_collect(page, extract, cap, ctx)
 
 
 async def similar_urls(page, engine: str, seed: str, cap: int, ctx) -> list[str]:

@@ -71,8 +71,9 @@ A session is a saved set of Collect settings (source, query, filters, options, s
 * **Sort into Portrait / Landscape / Square folders** can be switched off to save everything into the collection folder.
 * **Visually similar images (Bing, Yandex)** — give a seed: an image file, a folder of images (a random few are used), or an
   image URL. The scraper uploads each seed to the engine's visual search and downloads only the
-  *visually similar* results, not the identification of the picture. The search terms are optional; with them, normal
-  results are added too.
+  *visually similar* results, not the identification of the picture. While a seed is set the scrape is visual only —
+  the search terms are ignored — and it keeps scrolling the results grid for more similar images. Clear the seed to
+  search by text again.
 * **Keep only images that look like my examples** — a per-session similarity filter, always editable. Choose a model, a
   folder of images to go for and (optionally) a folder of images to avoid. Each download is scored as
   `mean similarity to "look like" − mean similarity to "don't look like"`; images at or below the threshold are skipped.

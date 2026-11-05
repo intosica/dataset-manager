@@ -394,17 +394,17 @@ async def run(query: str, opts: CollectOptions, settings: Settings, sink: ImageS
                 if opts.randomize:
                     random.shuffle(variants)
                 urls_to_visit += [urls_to_visit[0] + v for v in variants]
-        if opts.seeds:                          # visually similar images for each seed image
+        if opts.seeds:                          # visual search: only the 'visually similar' results, never a term search
             from .visual import similar_urls
-            per_seed = -(-limit // (len(opts.seeds) + (1 if query else 0))) if limit else 0
+            per_seed = -(-limit // len(opts.seeds)) if limit else 0
+            want = max(40, per_seed * 6) if per_seed else 0      # candidates: some downloads always drop out
             for n, seed in enumerate(opts.seeds, 1):
                 if ctx.cancelled or (limit and sink.counts["saved"] >= limit):
                     break
                 ctx.log(f"Visual search {n}/{len(opts.seeds)}: {os.path.basename(seed) if not seed.startswith('http') else seed}")
-                found = await similar_urls(page, engine, seed, per_seed * 3 if per_seed else 0, ctx)
+                found = await similar_urls(page, engine, seed, want, ctx)
                 await download(found, sink.counts["saved"] + per_seed if per_seed else 0)
-            if not query:
-                return
+            return
         ctx.progress(0, 0, "Loading page")
         ctx.log("Loading page...")
         await page.goto(urls_to_visit[0], wait_until="domcontentloaded")

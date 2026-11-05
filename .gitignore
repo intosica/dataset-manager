@@ -8,3 +8,4 @@ examples*/
 .flatpak-builder/
 flatpak/extra-requirements.txt
 *.flatpak
+AGENT-HANDOFF.md

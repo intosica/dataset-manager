@@ -4,8 +4,8 @@ set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
-DESKTOP="$DATA/applications/dataset-manager.desktop"
-ICON="$DATA/icons/hicolor/scalable/apps/dataset-manager.svg"
+DESKTOP="$DATA/applications/io.github.intosica.DatasetManager.desktop"
+ICON="$DATA/icons/hicolor/scalable/apps/io.github.intosica.DatasetManager.svg"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
     rm -f "$DESKTOP" "$ICON"
@@ -21,12 +21,12 @@ GenericName=Image Dataset Manager
 Comment=Collect, organize, caption and de-duplicate image datasets
 Exec="$APP_DIR/run.sh" %U
 Path=$APP_DIR
-Icon=dataset-manager
+Icon=io.github.intosica.DatasetManager
 Terminal=false
 Categories=Graphics;Utility;
 Keywords=images;dataset;captions;duplicates;upscale;
 StartupNotify=true
-StartupWMClass=dataset-manager
+StartupWMClass=io.github.intosica.DatasetManager
 DESK
     echo "Installed: $DESKTOP"
 fi

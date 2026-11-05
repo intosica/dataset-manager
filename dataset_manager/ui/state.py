@@ -1,21 +1,31 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Signal
-
 from ..core.settings import Settings
 from ..core.upscaler import get_upscaler
 
 
-class AppState(QObject):
-    """Shared settings and change notifications for all pages."""
-
-    settingsChanged = Signal()   # preferences or options changed
-    libraryChanged = Signal()    # a different library folder was chosen
-    contentChanged = Signal()    # files in the library were added / moved / removed
+class Signal:
+    """Minimal callback list; every handler runs on the GTK main thread."""
 
     def __init__(self):
-        super().__init__()
+        self._handlers = []
+
+    def connect(self, fn) -> None:
+        self._handlers.append(fn)
+
+    def emit(self, *args) -> None:
+        for fn in list(self._handlers):
+            fn(*args)
+
+
+class AppState:
+    """Shared settings and change notifications for all pages."""
+
+    def __init__(self):
         self.settings = Settings.load()
+        self.settings_changed = Signal()   # preferences or options changed
+        self.library_changed = Signal()    # a different library folder was chosen
+        self.content_changed = Signal()    # files in the library were added / moved / removed
         self.apply_runtime()
 
     def apply_runtime(self) -> None:
@@ -27,7 +37,7 @@ class AppState(QObject):
         except OSError:
             pass
         self.apply_runtime()
-        self.settingsChanged.emit()
+        self.settings_changed.emit()
 
     @property
     def library(self) -> str:
@@ -36,4 +46,4 @@ class AppState(QObject):
     def set_library(self, path: str) -> None:
         self.settings.library_dir = path
         self.save()
-        self.libraryChanged.emit()
+        self.library_changed.emit()

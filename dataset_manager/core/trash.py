@@ -1,4 +1,4 @@
-"""Move files to the desktop Trash (freedesktop spec) without Qt."""
+"""Move files to the desktop Trash (freedesktop spec) without GTK."""
 from __future__ import annotations
 
 import shutil

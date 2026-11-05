@@ -1,5 +1,4 @@
-# Required
-PySide6>=6.6
+# Required (the GTK 4 / libadwaita bindings, PyGObject, come from the GNOME runtime or your distribution)
 Pillow
 numpy
 

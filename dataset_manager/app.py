@@ -1,46 +1,59 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from . import APP_ID, APP_NAME, __version__
 
 ICON = Path(__file__).parent / "resources" / "dataset-manager.svg"
+ICON_DIR = Path(__file__).parent / "resources" / "icons"
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog=APP_ID, description=f"{APP_NAME} — image dataset manager")
+    parser = argparse.ArgumentParser(prog=APP_ID, description=f"{APP_NAME}: image dataset manager")
     parser.add_argument("--library", help="open this library folder (remembered for next time)")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
-    args, qt_args = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
+    args, gtk_args = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
 
     try:
-        from PySide6.QtGui import QGuiApplication, QIcon
-        from PySide6.QtWidgets import QApplication
-    except ImportError:
-        print("PySide6 is not installed in this environment.\n"
-              "Run:  venv/bin/pip install -r requirements.txt", file=sys.stderr)
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw, Gdk, GLib, Gtk
+    except (ImportError, ValueError) as exc:
+        print(f"GTK 4 / libadwaita (PyGObject) is not available: {exc}\n"
+              "Install python3-gi and gir1.2-adw-1 (Debian/Ubuntu/Pop!_OS) or use the Flatpak (./build-flatpak.sh).",
+              file=sys.stderr)
         return 1
 
     from .ui.main_window import MainWindow
     from .ui.state import AppState
+    from .ui.widgets import install_css
 
-    import os
-    flatpak_id = os.environ.get("FLATPAK_ID")
-    # matches the window to the .desktop entry (WM_CLASS on X11, app_id on Wayland)
-    QGuiApplication.setDesktopFileName(flatpak_id or APP_ID)
-    app = QApplication([sys.argv[0], *qt_args])
-    if flatpak_id:
-        app.setStyle("Fusion")        # the sandbox has no desktop Qt style plugins; Fusion follows the palette
-    app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_NAME)
-    app.setApplicationVersion(__version__)
-    app.setWindowIcon(QIcon(str(ICON)))
-
+    app_id = os.environ.get("FLATPAK_ID") or "io.github.intosica.DatasetManager"
+    GLib.set_application_name(APP_NAME)
+    GLib.set_prgname(app_id)
+    app = Adw.Application(application_id=app_id)
     state = AppState()
     if args.library:
         state.set_library(args.library)
-    window = MainWindow(state)
-    window.show()
-    return app.exec()
+
+    def on_activate(application) -> None:
+        win = application.props.active_window
+        if win is None:
+            Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(str(ICON_DIR))
+            Gtk.Window.set_default_icon_name(app_id)
+            install_css()
+            win = MainWindow(application, state)
+            application.set_accels_for_action("win.preferences", ["<Control>comma"])
+            application.set_accels_for_action("win.new-session", ["<Control>n"])
+            application.set_accels_for_action("win.choose-library", ["<Control>o"])
+            application.set_accels_for_action("win.quit", ["<Control>q"])
+            for i in range(1, 6):
+                application.set_accels_for_action(f"win.page-{i}", [f"<Control>{i}"])
+        win.present()
+
+    app.connect("activate", on_activate)
+    return app.run([sys.argv[0], *gtk_args])

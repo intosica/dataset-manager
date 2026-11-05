@@ -1,165 +1,152 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QFileDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QSizePolicy, QSplitter,
-                               QStackedWidget, QStyle, QTabBar, QToolBar, QWidget)
+from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from .. import APP_NAME, __version__
-from ..core.upscaler import get_upscaler
+from ..core.sessions import SessionStore
 from .collect_page import CollectPage
 from .duplicates_page import DuplicatesPage
 from .library_page import LibraryPage
 from .maintenance_page import MaintenancePage
 from .preferences import PreferencesDialog
 from .sessions_panel import SessionsPanel
-from .state import AppState
 from .tags_page import TagsPage
-from .widgets import TaskPanel, themed_icon
+from .widgets import TaskPanel, alert, icon_button, open_path
+
+PAGES = [("collect", "Collect", "folder-download-symbolic", CollectPage),
+         ("library", "Library", "folder-pictures-symbolic", LibraryPage),
+         ("duplicates", "Duplicates", "edit-copy-symbolic", DuplicatesPage),
+         ("maintenance", "Maintenance", "applications-engineering-symbolic", MaintenancePage),
+         ("tags", "Tag Tools", "bookmark-new-symbolic", TagsPage)]
 
 
-class MainWindow(QMainWindow):
-    def __init__(self, state: AppState):
-        super().__init__()
+class MainWindow(Adw.ApplicationWindow):
+    def __init__(self, app, state):
+        super().__init__(application=app, title=APP_NAME, default_width=1280, default_height=840)
         self.state = state
-        self.setWindowTitle(APP_NAME)
-        self.resize(1280, 820)
 
-        # ---- pages + sidebar ----
-        pages = [
-            ("Collect", ("folder-download", "emblem-downloads", "download"), QStyle.StandardPixmap.SP_ArrowDown, CollectPage),
-            ("Library", ("folder-pictures", "image-x-generic", "view-media-library"), QStyle.StandardPixmap.SP_DirIcon, LibraryPage),
-            ("Duplicates", ("edit-copy", "edit-find-replace"), QStyle.StandardPixmap.SP_FileDialogDetailedView, DuplicatesPage),
-            ("Maintenance", ("tools-wizard", "applications-utilities", "preferences-other"), QStyle.StandardPixmap.SP_FileDialogListView, MaintenancePage),
-            ("Tag Tools", ("tag", "bookmark-new", "format-text-bold"), QStyle.StandardPixmap.SP_FileDialogContentsView, TagsPage),
-        ]
-        # pages are tabs along the top; the left side holds the saved scraping sessions
-        self.tabs = QTabBar()
-        self.tabs.setDocumentMode(True)
-        self.tabs.setExpanding(False)
-        self.tabs.setDrawBase(False)
-        self.tabs.setIconSize(QSize(20, 20))
-        self.tabs.setStyleSheet("QTabBar::tab { padding: 7px 14px; }")
-        self.stack = QStackedWidget()
-        for i, (title, names, fallback, cls) in enumerate(pages, 1):
-            self.tabs.addTab(themed_icon(*names, fallback=fallback), title)
-            self.tabs.setTabToolTip(i - 1, f"{title}  (Ctrl+{i})")
-            self.stack.addWidget(cls(state))
-            act = QAction(title, self)
-            act.setShortcut(QKeySequence(f"Ctrl+{i}"))
-            act.triggered.connect(lambda _=False, n=i - 1: self.tabs.setCurrentIndex(n))
-            self.addAction(act)
-        self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
-        self.collect: CollectPage = self.stack.widget(0)
+        # ---- pages ----
+        self.stack = Adw.ViewStack()
+        for name, title, icon, cls in PAGES:
+            self.stack.add_titled_with_icon(cls(state), name, title, icon)
+        self.collect: CollectPage = self.stack.get_child_by_name("collect")
 
-        self.sessions = SessionsPanel(self.collect.params)
-        self.sessions.setMinimumWidth(180)
-        self.sessions.sessionActivated.connect(self._open_session)
-        self.collect.paramsChanged.connect(lambda: self.sessions.update_current(self.collect.params()))
-        self.collect.started.connect(self._ensure_session)
-        new_session = QAction("New Session", self)
-        new_session.setShortcut(QKeySequence.StandardKey.New)
-        new_session.triggered.connect(lambda: self.sessions.new_session())
+        # ---- sessions (left) ----
+        self.store = SessionStore()
+        self.sessions = SessionsPanel(self.store, self.collect.params, self._load_session, self.collect.defaults)
+        self.collect.changed.append(self.sessions.edited)
+        self.sessions.ensure_session()
 
-        split = QSplitter()
-        split.addWidget(self.sessions)
-        split.addWidget(self.stack)
-        split.setStretchFactor(1, 1)
-        split.setSizes([230, 900])
-        split.setChildrenCollapsible(False)
-        self.setCentralWidget(split)
+        side_header = Adw.HeaderBar(show_title=True)
+        side_header.set_title_widget(Gtk.Label(label="Sessions", css_classes=["heading"]))
+        start, end = self.sessions.header_buttons()
+        for b in start:
+            side_header.pack_start(b)
+        for b in end:
+            side_header.pack_end(b)
+        side = Adw.ToolbarView(content=self.sessions)
+        side.add_top_bar(side_header)
+
+        # ---- content ----
+        switcher = Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        self.sidebar_btn = Gtk.ToggleButton(icon_name="sidebar-show-symbolic", active=True, tooltip_text="Sessions")
+        header = Adw.HeaderBar(title_widget=switcher)
+        header.pack_start(self.sidebar_btn)
+        self.lib_btn = icon_button("folder-symbolic", "Show the library folder in Files")
+        self.lib_btn.connect("clicked", lambda _b: open_path(state.library))
+        menu = Gio.Menu()
+        sec1 = Gio.Menu()
+        sec1.append("Choose Library Folder…", "win.choose-library")
+        sec1.append("Show Library in Files", "win.show-library")
+        sec2 = Gio.Menu()
+        sec2.append("New Session", "win.new-session")
+        sec2.append("Preferences", "win.preferences")
+        sec2.append(f"About {APP_NAME}", "win.about")
+        sec2.append("Quit", "win.quit")
+        menu.append_section(None, sec1)
+        menu.append_section(None, sec2)
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu, primary=True,
+                                       tooltip_text="Main menu"))
+        header.pack_end(self.lib_btn)
+        bar = Adw.ViewSwitcherBar(stack=self.stack)
+        main = Adw.ToolbarView(content=self.stack)
+        main.add_top_bar(header)
+        main.add_bottom_bar(bar)
+
+        self.split = Adw.OverlaySplitView(sidebar=side, content=main, min_sidebar_width=210, max_sidebar_width=340,
+                                          sidebar_width_fraction=0.2)
+        self.sidebar_btn.bind_property("active", self.split, "show-sidebar", GObject.BindingFlags.BIDIRECTIONAL |
+                                       GObject.BindingFlags.SYNC_CREATE)
+        self.set_content(self.split)
+
+        # narrow window: sidebar becomes an overlay, the switcher moves to the bottom
+        bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 760sp"))
+        bp.add_setter(self.split, "collapsed", True)
+        bp.add_setter(bar, "reveal", True)
+        self.add_breakpoint(bp)
 
         # ---- actions ----
-        choose = QAction(themed_icon("folder-open", "document-open", fallback=QStyle.StandardPixmap.SP_DirOpenIcon),
-                         "Choose Library Folder…", self)
-        choose.setShortcut(QKeySequence.StandardKey.Open)
-        choose.triggered.connect(self.choose_library)
-        reveal = QAction(themed_icon("system-file-manager", "document-open-folder", fallback=QStyle.StandardPixmap.SP_DirLinkIcon),
-                         "Show Library in File Manager", self)
-        reveal.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(state.library)))
-        prefs = QAction(themed_icon("configure", "preferences-system", fallback=QStyle.StandardPixmap.SP_FileDialogInfoView),
-                        "Preferences…", self)
-        prefs.setShortcut(QKeySequence.StandardKey.Preferences)
-        prefs.setMenuRole(QAction.MenuRole.PreferencesRole)
-        prefs.triggered.connect(self.show_preferences)
-        quit_act = QAction(themed_icon("application-exit", fallback=QStyle.StandardPixmap.SP_DialogCloseButton), "Quit", self)
-        quit_act.setShortcut(QKeySequence.StandardKey.Quit)
-        quit_act.triggered.connect(self.close)
-        about = QAction(f"About {APP_NAME}", self)
-        about.triggered.connect(self.show_about)
+        for name, fn in (("choose-library", self.choose_library), ("show-library", lambda: open_path(state.library)),
+                         ("new-session", self._new_session), ("preferences", self.show_preferences),
+                         ("about", self.show_about), ("quit", self.close)):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", lambda _a, _p, f=fn: f())
+            self.add_action(act)
+        for i, (name, *_rest) in enumerate(PAGES, 1):
+            act = Gio.SimpleAction.new(f"page-{i}", None)
+            act.connect("activate", lambda _a, _p, n=name: self.stack.set_visible_child_name(n))
+            self.add_action(act)
 
-        menu = self.menuBar()
-        m_file = menu.addMenu("&File")
-        m_file.addAction(new_session)
-        m_file.addSeparator()
-        m_file.addActions([choose, reveal])
-        m_file.addSeparator()
-        m_file.addAction(quit_act)
-        menu.addMenu("&Settings").addAction(prefs)
-        menu.addMenu("&Help").addAction(about)
-
-        # ---- top bar: page tabs + library ----
-        bar = QToolBar("Navigation")
-        bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        bar.addWidget(self.tabs)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.addWidget(spacer)
-        bar.addWidget(QLabel("Library: "))
-        self.lib_edit = QLineEdit()
-        self.lib_edit.setReadOnly(True)
-        self.lib_edit.setMinimumWidth(220)
-        self.lib_edit.setMaximumWidth(420)
-        bar.addWidget(self.lib_edit)
-        bar.addAction(choose)
-        bar.addAction(reveal)
-        self.addToolBar(bar)
-
-        # ---- status bar ----
-        self.model_label = QLabel()
-        self.statusBar().addPermanentWidget(self.model_label)
-        state.libraryChanged.connect(self._update_chrome)
-        state.settingsChanged.connect(self._update_chrome)
+        state.library_changed.connect(self._update_chrome)
         self._update_chrome()
+        self.connect("close-request", self._close_request)
+
+    def _load_session(self, params: dict) -> None:
+        self.collect.set_params(params)
+        self.stack.set_visible_child_name("collect")
+
+    def _new_session(self) -> None:
+        self.sessions.new_session()
+        self.stack.set_visible_child_name("collect")
 
     def _update_chrome(self) -> None:
-        self.lib_edit.setText(self.state.library)
-        up = get_upscaler()
-        self.model_label.setText("Upscale model: " + (up.model_path.rsplit("/", 1)[-1] if up.model_path else "none") + "   ")
-
-    def _open_session(self, params: dict) -> None:
-        self.collect.set_params(params)
-        self.tabs.setCurrentIndex(0)
-
-    def _ensure_session(self) -> None:
-        """Every collection run is remembered as a session."""
-        if self.sessions.current_session() is None:
-            self.sessions.new_session()
+        self.lib_btn.set_tooltip_text(f"Library: {self.state.library} (click to open)")
 
     def choose_library(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Choose Library Folder", self.state.library)
-        if path:
-            self.state.set_library(path)
+        dlg = Gtk.FileDialog(title="Choose Library Folder")
+        if self.state.library:
+            dlg.set_initial_folder(Gio.File.new_for_path(self.state.library))
+
+        def done(d, res):
+            try:
+                f = d.select_folder_finish(res)
+            except GLib.Error:
+                return
+            if f and f.get_path():
+                self.state.set_library(f.get_path())
+        dlg.select_folder(self, None, done)
 
     def show_preferences(self) -> None:
-        PreferencesDialog(self.state, self).exec()
+        PreferencesDialog(self.state).present(self)
 
     def show_about(self) -> None:
-        QMessageBox.about(self, f"About {APP_NAME}",
-                          f"<h3>{APP_NAME} {__version__}</h3>"
-                          "<p>Collect, organize, caption and de-duplicate image datasets.</p>")
+        about = Adw.AboutDialog(application_name=APP_NAME, application_icon=self.get_application().get_application_id(),
+                                version=__version__, developer_name="intosica",
+                                comments="Collect, organize, caption and de-duplicate image datasets.",
+                                website="https://github.com/intosica/dataset-manager")
+        about.present(self)
 
-    def closeEvent(self, event) -> None:
+    def _close_request(self, _w) -> bool:
         if TaskPanel.active is not None:
-            answer = QMessageBox.question(self, "Task in progress",
-                                          "A task is still running. Cancel it and quit?",
-                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                          QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-            TaskPanel.cancel_active()
-            TaskPanel.wait_active()
-        self.sessions.save()
-        event.accept()
+            def answered(rid: str) -> None:
+                if rid == "quit":
+                    TaskPanel.cancel_active()
+                    TaskPanel.wait_active()
+                    self.sessions.flush()
+                    self.destroy()
+            alert(self, "Task in progress", "A task is still running. Cancel it and quit?",
+                  [("keep", "Keep Running"), ("quit", "Cancel and Quit")], destructive="quit", default="keep",
+                  callback=answered)
+            return True
+        self.sessions.flush()
+        return False

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Dataset Manager flatpak (X11 / Xorg session) and installs it for the current user.
+# Builds the Dataset Manager flatpak (GNOME / libadwaita; Wayland or X11) and installs it for the current user.
 #
 #   ./build-flatpak.sh                          build + install (user)
 #   ./build-flatpak.sh --bundle                 also write a single-file dataset-manager.flatpak bundle
@@ -35,7 +35,7 @@ done
 
 # runtime + SDK (no-op when already installed)
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user --noninteractive --or-update flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+flatpak install --user --noninteractive --or-update flathub org.gnome.Platform//50 org.gnome.Sdk//50
 
 tr ' ' '\n' <<<"$EXTRAS" | sed '/^$/d' > "$DIR/flatpak/extra-requirements.txt"
 

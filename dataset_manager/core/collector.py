@@ -23,6 +23,7 @@ class CollectOptions:
     randomize: bool = False
     parallel: int = 4
     safe_search_off: bool = False
+    seeds: list = field(default_factory=list)            # image paths / URLs for 'visually similar' search
     filters: dict = field(default_factory=dict)          # group key -> [option values], see sources/filters.py
     similarity: SimilaritySpec = field(default_factory=SimilaritySpec)
     sink: SinkOptions = field(default_factory=SinkOptions)
@@ -45,9 +46,11 @@ def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -
     from .sources import mtg, search
 
     query = opts.query.strip()
-    if not query:
-        ctx.log("Enter search terms or a URL.")
+    if not query and not opts.seeds:
+        ctx.log("Enter search terms or a URL, or a seed image for visual search.")
         return {}
+    if opts.seeds and opts.source not in ("Bing", "Yandex"):
+        opts.seeds = []
     needs = {"ArtofMTG": ["requests", "bs4"]}.get(opts.source, ["playwright"])
     missing = [m for m in needs if not capabilities.has(m)]
     if missing:
@@ -57,7 +60,12 @@ def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -
             ctx.log(f"  {cmd}")
         return {}
 
-    tag, folder = derive_names(query, opts.collection_name)
+    if query:
+        tag, folder = derive_names(query, opts.collection_name)
+    else:                                        # seeds only: name the collection after the first seed
+        seed = opts.seeds[0]
+        stem = os.path.splitext(os.path.basename(urlparse(seed).path if seed.startswith("http") else seed))[0]
+        tag, folder = derive_names("", opts.collection_name or f"Similar to {stem[:40] or 'seed'}")
     save_dir = os.path.join(settings.library_path(), folder)
     if os.path.commonpath([os.path.abspath(settings.library_path()), os.path.abspath(save_dir)]) \
             != os.path.abspath(settings.library_path()):
@@ -72,7 +80,7 @@ def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -
         if ctx.cancelled:
             return {}
     sink = ImageSink(save_dir, tag, opts.sink)
-    ctx.log(f"Source: {opts.source}   Query: {query}")
+    ctx.log(f"Source: {opts.source}   Query: {query or '(visual search)'}")
     ctx.log(f"Destination: {save_dir}")
     ctx.log("Indexing existing images..." if opts.sink.skip_duplicates else "Preparing...")
     sink.prepare()

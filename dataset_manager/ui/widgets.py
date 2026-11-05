@@ -1,136 +1,207 @@
+"""Shared GTK building blocks: background tasks, log panel, path / model / caption rows."""
 from __future__ import annotations
 
 import os
+import threading
+import traceback
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFontDatabase, QIcon
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton, QStyle, QVBoxLayout, QWidget)
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 
-from ..core.captions import PLACEHOLDERS, CaptionSpec, render_caption
 from ..core import capabilities, paths
+from ..core import trash as core_trash
+from ..core.captions import PLACEHOLDERS, CaptionSpec, render_caption
+from ..core.sources.filters import FILTERS
+from ..core.tasks import TaskContext
 from ..core.upscaler import MODEL_EXTS, discover_models, get_upscaler
-from .workers import Worker, run_background
+
+CSS = """
+.chip { border-radius: 999px; padding: 2px 12px; min-height: 26px; }
+.chip:checked { background: @accent_bg_color; color: @accent_fg_color; }
+.swatch { border-radius: 999px; min-width: 22px; min-height: 22px; padding: 0; border: 2px solid alpha(currentColor, .25); }
+.swatch:checked { border-color: @accent_bg_color; box-shadow: 0 0 0 2px @accent_bg_color; }
+.log { font-family: monospace; font-size: 0.9em; padding: 6px; }
+.drop-active { background: alpha(@accent_bg_color, .25); }
+.thumb { border-radius: 8px; }
+.sessions row.folder-row { font-weight: bold; }
+"""
 
 
-def themed_icon(*names: str, fallback=QStyle.StandardPixmap.SP_FileIcon) -> QIcon:
-    """Icon from the active desktop theme (Breeze, Adwaita, …) with a style fallback."""
-    for n in names:
-        icon = QIcon.fromTheme(n)
-        if not icon.isNull():
-            return icon
-    return QApplication.style().standardIcon(fallback)
+def _swatch_css() -> str:
+    colours = {sw for groups in FILTERS.values() for _k, _l, opts in groups for _o, _v, sw in opts if sw}
+    return "".join(f"button.swatch.sw{c.lstrip('#')} {{ background: {c}; }}\n" for c in sorted(colours))
 
 
-def heading(text: str) -> QLabel:
-    label = QLabel(text)
-    font = label.font()
-    font.setBold(True)
-    font.setPointSizeF(font.pointSizeF() * 1.25)
-    label.setFont(font)
+def install_css() -> None:
+    provider = Gtk.CssProvider()
+    provider.load_from_string(CSS + _swatch_css())
+    Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+
+def hint(text: str = "") -> Gtk.Label:
+    label = Gtk.Label(label=text, xalign=0, wrap=True)
+    label.add_css_class("dim-label")
+    label.add_css_class("caption")
     return label
 
 
-def hint(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setWordWrap(True)
-    label.setEnabled(False)          # renders in the palette's muted "disabled text" colour
-    return label
+def icon_button(icon: str, tooltip: str, callback=None, flat: bool = True) -> Gtk.Button:
+    b = Gtk.Button(icon_name=icon, tooltip_text=tooltip, valign=Gtk.Align.CENTER)
+    if flat:
+        b.add_css_class("flat")
+    if callback:
+        b.connect("clicked", lambda _b: callback())
+    return b
 
 
-class PathEdit(QWidget):
-    """Line edit + Browse… button using the platform's native file dialog."""
+def desktop_trash(path: str) -> bool:
+    """GIO trash (uses the portal inside Flatpak), then command-line helpers."""
+    try:
+        if Gio.File.new_for_path(path).trash(None):
+            return True
+    except GLib.Error:
+        pass
+    return core_trash.move_to_trash(path)
 
-    textChanged = Signal(str)
 
-    def __init__(self, mode: str = "dir", file_filter: str = "All files (*)", placeholder: str = "", parent=None):
-        super().__init__(parent)
-        self.mode, self.file_filter = mode, file_filter
-        self.edit = QLineEdit()
-        self.edit.setPlaceholderText(placeholder)
-        self.edit.setClearButtonEnabled(True)
-        self.button = QPushButton(themed_icon("document-open", "folder-open", fallback=QStyle.StandardPixmap.SP_DirOpenIcon),
-                                  "Browse…")
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self.edit, 1)
-        row.addWidget(self.button)
-        self.button.clicked.connect(self._browse)
-        self.edit.textChanged.connect(self.textChanged)
+def _once(fn, *args):
+    GLib.idle_add(lambda: (fn(*args), False)[1])
 
-    def text(self) -> str:
-        return self.edit.text().strip()
 
-    def setText(self, text: str) -> None:
-        self.edit.setText(text)
+def run_background(fn, on_result) -> None:
+    """Short read-only job on a thread; on_result runs on the main thread."""
+    def work():
+        try:
+            result = fn()
+        except Exception:
+            traceback.print_exc()
+            return
+        _once(on_result, result)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def alert(parent, heading: str, body: str, responses: list, destructive: str = "", default: str = "", callback=None) -> None:
+    """responses: [(id, label)]. callback(id) runs when answered."""
+    dlg = Adw.AlertDialog.new(heading, body)
+    for rid, label in responses:
+        dlg.add_response(rid, label)
+    if destructive:
+        dlg.set_response_appearance(destructive, Adw.ResponseAppearance.DESTRUCTIVE)
+    if default:
+        dlg.set_default_response(default)
+        dlg.set_close_response(responses[0][0])
+
+    def done(d, res):
+        if callback:
+            callback(d.choose_finish(res))
+    dlg.choose(parent, None, done)
+
+
+class PathRow(Adw.EntryRow):
+    """Entry row with a Browse button that opens the native (portal) file chooser."""
+
+    def __init__(self, title: str, mode: str = "dir", placeholder: str = ""):
+        super().__init__(title=title)
+        self.mode, self.placeholder = mode, placeholder
+        btn = icon_button("folder-open-symbolic", "Browse…", self._browse)
+        self.add_suffix(btn)
+
+    def path(self) -> str:
+        return paths.clean_user_path(self.get_text())
 
     def _browse(self) -> None:
-        start = self.text() or ""
-        if self.mode == "dir":
-            path = QFileDialog.getExistingDirectory(self, "Choose Folder", start)
-        else:
-            path, _ = QFileDialog.getOpenFileName(self, "Choose File", start, self.file_filter)
-        if path:
-            self.edit.setText(path)
+        dlg = Gtk.FileDialog()
+        cur = self.path()
+        folder = cur if self.mode == "dir" else os.path.dirname(cur)
+        if folder and os.path.isdir(folder):
+            dlg.set_initial_folder(Gio.File.new_for_path(folder))
+
+        def done(d, res):
+            try:
+                f = d.select_folder_finish(res) if self.mode == "dir" else d.open_finish(res)
+            except GLib.Error:
+                return
+            if f and f.get_path():
+                self.set_text(f.get_path())
+        (dlg.select_folder if self.mode == "dir" else dlg.open)(self.get_root(), None, done)
 
 
-class TaskPanel(QWidget):
+class TaskPanel(Gtk.Box):
     """Progress bar + log for one long-running task. Only one task may run at a time app-wide."""
 
-    busyChanged = Signal(bool)
     active: "TaskPanel | None" = None
 
-    def __init__(self, parent=None, min_log_height: int = 140):
-        super().__init__(parent)
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1)
-        self.bar.setValue(0)
-        self.status = QLabel("")
-        self.status.setEnabled(False)
-        self.log = QPlainTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMaximumBlockCount(5000)
-        self.log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.log.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
-        self.log.setMinimumHeight(min_log_height)
-        top = QHBoxLayout()
-        top.addWidget(self.bar, 1)
-        top.addWidget(self.status)
-        col = QVBoxLayout(self)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.addLayout(top)
-        col.addWidget(self.log, 1)
-        self._worker: Worker | None = None
+    def __init__(self, min_height: int = 140):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.bar = Gtk.ProgressBar(hexpand=True, valign=Gtk.Align.CENTER)
+        self.status = Gtk.Label(xalign=1, ellipsize=Pango.EllipsizeMode.END)
+        self.status.add_css_class("dim-label")
+        top = Gtk.Box(spacing=12)
+        top.append(self.bar)
+        top.append(self.status)
+        self.buffer = Gtk.TextBuffer()
+        self.view = Gtk.TextView(buffer=self.buffer, editable=False, cursor_visible=False, monospace=True,
+                                 wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        self.view.add_css_class("log")
+        self.scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=min_height, child=self.view)
+        self.scroll.add_css_class("card")
+        self.append(top)
+        self.append(self.scroll)
+        self.busy_callbacks = []
+        self._thread = None
+        self._ctx = None
+        self._pulse_id = 0
+        self._indeterminate = False
         self._on_success = None
 
     @property
     def busy(self) -> bool:
-        return self._worker is not None
+        return self._thread is not None
+
+    def on_busy(self, fn) -> None:
+        self.busy_callbacks.append(fn)
+
+    def log(self, msg: str) -> None:
+        end = self.buffer.get_end_iter()
+        self.buffer.insert(end, msg + "\n")
+        if self.buffer.get_line_count() > 5000:
+            self.buffer.delete(self.buffer.get_start_iter(), self.buffer.get_iter_at_line(1000))
+        adj = self.scroll.get_vadjustment()
+        GLib.idle_add(lambda: (adj.set_value(adj.get_upper() - adj.get_page_size()), False)[1])
+
+    def clear(self) -> None:
+        self.buffer.set_text("")
 
     def run(self, fn, on_success=None, with_trash: bool = False) -> bool:
         if TaskPanel.active is not None:
-            QMessageBox.information(self.window(), "Task in progress",
-                                    "Another task is still running. Wait for it to finish or cancel it first.")
+            alert(self.get_root(), "Task in progress",
+                  "Another task is still running. Wait for it to finish or cancel it first.", [("ok", "OK")])
             return False
-        self.log.clear()
-        self.status.setText("")
-        worker = Worker(fn, self, with_trash)
-        worker.log.connect(self.log.appendPlainText)
-        worker.progress.connect(self._on_progress)
-        worker.succeeded.connect(self._on_succeeded)
-        worker.failed.connect(self._on_failed)
-        worker.finished.connect(self._on_finished)
-        self._worker, self._on_success = worker, on_success
+        self.clear()
+        self.status.set_text("")
+        self._on_success = on_success
+        ctx = TaskContext(lambda m: _once(self.log, m), lambda d, t, x: _once(self._progress, d, t, x),
+                          trash=desktop_trash if with_trash else None)
+        self._ctx = ctx
         TaskPanel.active = self
-        self.bar.setRange(0, 0)       # indeterminate until the task reports progress
-        self.busyChanged.emit(True)
-        worker.start()
+        self._set_indeterminate(True)
+        for cb in self.busy_callbacks:
+            cb(True)
+
+        def work():
+            result, err = None, None
+            try:
+                result = fn(ctx)
+            except Exception:
+                err = traceback.format_exc()
+            _once(self._finished, result, err)
+        self._thread = threading.Thread(target=work, daemon=True)
+        self._thread.start()
         return True
 
     def cancel(self) -> None:
-        if self._worker:
-            self.log.appendPlainText("Cancelling…")
-            self._worker.cancel()
+        if self._ctx and not self._ctx.cancelled:
+            self.log("Cancelling…")
+            self._ctx.cancel()
 
     @classmethod
     def cancel_active(cls) -> None:
@@ -138,160 +209,172 @@ class TaskPanel(QWidget):
             cls.active.cancel()
 
     @classmethod
-    def wait_active(cls, ms: int = 8000) -> None:
-        if cls.active and cls.active._worker:
-            cls.active._worker.wait(ms)
+    def wait_active(cls, seconds: float = 8.0) -> None:
+        if cls.active and cls.active._thread:
+            cls.active._thread.join(seconds)
 
-    def _on_progress(self, done: int, total: int, text: str) -> None:
+    def _set_indeterminate(self, on: bool) -> None:
+        self._indeterminate = on
+        if on and not self._pulse_id:
+            self._pulse_id = GLib.timeout_add(120, self._pulse)
+
+    def _pulse(self) -> bool:
+        if not self._indeterminate:
+            self._pulse_id = 0
+            return False
+        self.bar.pulse()
+        return True
+
+    def _progress(self, done: int, total: int, text: str) -> None:
         if total <= 0:
-            self.bar.setRange(0, 0)
+            self._set_indeterminate(True)
         else:
-            self.bar.setRange(0, total)
-            self.bar.setValue(min(done, total))
-        self.status.setText(text)
+            self._set_indeterminate(False)
+            self.bar.set_fraction(min(1.0, done / total))
+        self.status.set_text(text)
 
-    def _on_succeeded(self, result) -> None:
-        if self._on_success:
-            self._on_success(result)
-
-    def _on_failed(self, tb: str) -> None:
-        self.log.appendPlainText("An unexpected error occurred:\n" + tb)
-
-    def _on_finished(self) -> None:
-        worker, self._worker = self._worker, None
+    def _finished(self, result, err) -> None:
+        self._thread = self._ctx = None
         TaskPanel.active = None
-        self.bar.setRange(0, 1)
-        self.bar.setValue(1)
-        self.status.setText("")
-        if worker:
-            worker.deleteLater()
-        self.busyChanged.emit(False)
+        self._set_indeterminate(False)
+        self.bar.set_fraction(0)
+        self.status.set_text("")
+        if err:
+            self.log("An unexpected error occurred:\n" + err)
+        elif self._on_success:
+            self._on_success(result)
+        for cb in self.busy_callbacks:
+            cb(False)
 
 
-class CaptionEditor(QWidget):
+class CaptionEditor(Adw.PreferencesGroup):
     """Template + quality tags + extra tags with a live preview."""
 
-    changed = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.template = QLineEdit()
-        self.extra = QLineEdit()
-        self.extra.setPlaceholderText("e.g. anime screencap")
-        self.good = QLineEdit()
-        self.low = QLineEdit()
-        self.preview = QLabel()
-        self.preview.setWordWrap(True)
-        self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form = QFormLayout(self)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Template:", self.template)
-        form.addRow("", hint(f"Placeholders: {PLACEHOLDERS}"))
-        form.addRow("Extra tags:", self.extra)
-        form.addRow("Normal quality tags:", self.good)
-        form.addRow("Low quality tags:", self.low)
-        form.addRow("Preview:", self.preview)
+    def __init__(self):
+        super().__init__(title="Captions", description=f"Placeholders: {PLACEHOLDERS}")
+        self.changed = []
+        self.template = Adw.EntryRow(title="Template")
+        self.extra = Adw.EntryRow(title="Extra tags (e.g. anime screencap)")
+        self.good = Adw.EntryRow(title="Normal quality tags")
+        self.low = Adw.EntryRow(title="Low quality tags")
+        self.preview = Adw.ActionRow(title="Preview", subtitle_selectable=True)
+        self.preview.add_css_class("property")
+        for w in (self.template, self.extra, self.good, self.low, self.preview):
+            self.add(w)
         for w in (self.template, self.extra, self.good, self.low):
-            w.textChanged.connect(self._update)
+            w.connect("changed", lambda _w: self._update())
 
     def load(self, spec: CaptionSpec) -> None:
         for w, v in ((self.template, spec.template), (self.extra, spec.extra_tags),
                      (self.good, spec.good_tags), (self.low, spec.low_tags)):
-            w.setText(v)
+            if w.get_text() != v:
+                w.set_text(v)
         self._update()
 
     def spec(self) -> CaptionSpec:
-        return CaptionSpec(self.template.text(), self.good.text(), self.low.text(), self.extra.text())
+        return CaptionSpec(self.template.get_text(), self.good.get_text(), self.low.get_text(), self.extra.get_text())
 
     def _update(self) -> None:
         s = self.spec()
-        self.preview.setText(f"{render_caption(s, 'my_collection', 'Landscape') or '(empty)'}\n"
-                             f"{render_caption(s, 'my_collection', 'Portrait', True) or '(empty)'}")
-        self.changed.emit()
+        text = (f"{render_caption(s, 'my_collection', 'Landscape') or '(empty)'}\n"
+                f"{render_caption(s, 'my_collection', 'Portrait', True) or '(empty)'}")
+        self.preview.set_subtitle(GLib.markup_escape_text(text))
+        for fn in self.changed:
+            fn()
 
 
-class ModelPicker(QWidget):
+class ModelPicker(Adw.ComboRow):
     """Pick the AI upscale model: discovered models, or any file via the native file dialog."""
 
-    def __init__(self, state, parent=None):
-        super().__init__(parent)
+    def __init__(self, state):
+        super().__init__(title="Upscale model")
         self.state = state
-        self.combo = QComboBox()
-        self.combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.combo.setMinimumContentsLength(24)
-        self.browse = QPushButton(themed_icon("document-open", "folder-open",
-                                              fallback=QStyle.StandardPixmap.SP_DirOpenIcon), "Browse…")
-        self.test = QPushButton("Test")
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        self.status.setEnabled(False)
-        row = QHBoxLayout()
-        row.addWidget(self.combo, 1)
-        row.addWidget(self.browse)
-        row.addWidget(self.test)
-        col = QVBoxLayout(self)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(2)
-        col.addLayout(row)
-        col.addWidget(self.status)
-        self.combo.activated.connect(self._chosen)
-        self.browse.clicked.connect(self._browse)
-        self.test.clicked.connect(self._test)
-        state.settingsChanged.connect(self.reload)
+        self._values: list[str] = []
+        self._busy = False
+        self.add_suffix(icon_button("document-open-symbolic", "Choose a model file…", self._browse))
+        self.test_btn = icon_button("emblem-ok-symbolic", "Test the model", self._test)
+        self.add_suffix(self.test_btn)
+        self.connect("notify::selected", self._chosen)
+        state.settings_changed.connect(self.reload)
         self.reload()
 
     def reload(self) -> None:
         s = self.state.settings
-        self.combo.blockSignals(True)
-        self.combo.clear()
-        self.combo.addItem("Automatic (first model found)", "")
-        self.combo.addItem("None (standard resampling only)", "none")
         models = discover_models(s.all_model_dirs())
         cur = s.upscale_model
         if cur and cur != "none":
             cur_path = paths.resolve(cur)
             if cur_path not in models:
                 models.append(cur_path)
-        for p in models:
-            self.combo.addItem(f"{os.path.basename(p)}   ({os.path.dirname(p)})", p)
-            self.combo.setItemData(self.combo.count() - 1, p, Qt.ItemDataRole.ToolTipRole)
-        idx = self.combo.findData(cur) if cur in ("", "none") else self.combo.findData(paths.resolve(cur))
-        self.combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.combo.blockSignals(False)
+        self._values = ["", "none"] + models
+        labels = ["Automatic (first model found)", "None (standard resampling only)"] + \
+                 [f"{os.path.basename(p)}  ({os.path.dirname(p)})" for p in models]
+        self._busy = True
+        self.set_model(Gtk.StringList.new(labels))
+        want = cur if cur in ("", "none") else paths.resolve(cur)
+        self.set_selected(self._values.index(want) if want in self._values else 0)
+        self._busy = False
         self._set_status()
 
     def _set_status(self, text: str | None = None) -> None:
-        up = get_upscaler()
         if text is None:
+            up = get_upscaler()
             if not (capabilities.has("torch") and capabilities.has("spandrel")):
-                text = "AI upscaling needs: pip install torch spandrel (standard resampling is used until then)"
+                text = "AI upscaling needs torch and spandrel; standard resampling is used until then."
             elif up.model_path:
                 text = up.model_path
             else:
-                text = "No model selected — standard resampling is used."
-        self.status.setText(text)
+                text = "No model selected: standard resampling is used."
+        self.set_subtitle(GLib.markup_escape_text(text))
 
-    def _chosen(self) -> None:
-        self.state.settings.upscale_model = self.combo.currentData() or ""
+    def _chosen(self, *_a) -> None:
+        if self._busy or not self._values:
+            return
+        self.state.settings.upscale_model = self._values[self.get_selected()]
         self.state.save()
 
     def _browse(self) -> None:
         cur = self.state.settings.upscale_model
-        start = os.path.dirname(cur) if cur not in ("", "none") else ""
-        exts = " ".join(f"*{e}" for e in MODEL_EXTS)
-        path, _ = QFileDialog.getOpenFileName(self, "Choose Upscale Model", start,
-                                              f"Upscale models ({exts});;All files (*)")
-        if path:
-            self.state.settings.upscale_model = path
+        dlg = Gtk.FileDialog()
+        flt = Gtk.FileFilter()
+        flt.set_name("Upscale models")
+        for e in MODEL_EXTS:
+            flt.add_suffix(e.lstrip("."))
+        store = Gio.ListStore.new(Gtk.FileFilter)
+        store.append(flt)
+        dlg.set_filters(store)
+        if cur not in ("", "none") and os.path.isdir(os.path.dirname(cur)):
+            dlg.set_initial_folder(Gio.File.new_for_path(os.path.dirname(cur)))
+
+        def done(d, res):
+            try:
+                f = d.open_finish(res)
+            except GLib.Error:
+                return
+            self.state.settings.upscale_model = f.get_path()
             self.state.save()
+        dlg.open(self.get_root(), None, done)
 
     def _test(self) -> None:
-        self.status.setText("Loading model…")
-        self.test.setEnabled(False)
+        self._set_status("Loading model…")
+        self.test_btn.set_sensitive(False)
 
-        def done(result) -> None:
-            self.test.setEnabled(True)
+        def done(result):
+            self.test_btn.set_sensitive(True)
             self._set_status(("OK: " if result[0] else "Problem: ") + result[1])
+        run_background(get_upscaler().check, done)
 
-        run_background(get_upscaler().check, done, self)
 
+def open_path(path: str) -> None:
+    """Open a file or folder with the desktop's default handler (portal-aware inside Flatpak)."""
+    Gtk.FileLauncher.new(Gio.File.new_for_path(path)).launch(None, None, None)
+
+
+def page(child: Gtk.Widget, width: int = 860) -> Gtk.ScrolledWindow:
+    """Scrollable, width-limited page body, the standard libadwaita form layout."""
+    child.set_margin_top(18)
+    child.set_margin_bottom(18)
+    child.set_margin_start(12)
+    child.set_margin_end(12)
+    return Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                              child=Adw.Clamp(maximum_size=width, tightening_threshold=600, child=child))

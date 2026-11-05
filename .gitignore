@@ -1,2 +1,10 @@
 venv/
-venv/
+.venv/
+__pycache__/
+*.pyc
+data/
+.pi/
+examples*/
+.flatpak-builder/
+flatpak/extra-requirements.txt
+*.flatpak

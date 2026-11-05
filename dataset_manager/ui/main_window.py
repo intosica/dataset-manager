@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMainWindow, QMessageBox, QStackedWidget, QStyle, QToolBar, QWidget)
+from PySide6.QtWidgets import (QFileDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QSizePolicy, QSplitter,
+                               QStackedWidget, QStyle, QTabBar, QToolBar, QWidget)
 
 from .. import APP_NAME, __version__
 from ..core.upscaler import get_upscaler
@@ -12,6 +12,7 @@ from .duplicates_page import DuplicatesPage
 from .library_page import LibraryPage
 from .maintenance_page import MaintenancePage
 from .preferences import PreferencesDialog
+from .sessions_panel import SessionsPanel
 from .state import AppState
 from .tags_page import TagsPage
 from .widgets import TaskPanel, themed_icon
@@ -22,7 +23,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.state = state
         self.setWindowTitle(APP_NAME)
-        self.resize(1100, 760)
+        self.resize(1280, 820)
 
         # ---- pages + sidebar ----
         pages = [
@@ -32,35 +33,41 @@ class MainWindow(QMainWindow):
             ("Maintenance", ("tools-wizard", "applications-utilities", "preferences-other"), QStyle.StandardPixmap.SP_FileDialogListView, MaintenancePage),
             ("Tag Tools", ("tag", "bookmark-new", "format-text-bold"), QStyle.StandardPixmap.SP_FileDialogContentsView, TagsPage),
         ]
-        self.sidebar = QListWidget()
-        self.sidebar.setFixedWidth(190)
-        self.sidebar.setIconSize(QSize(22, 22))
-        self.sidebar.setFrameShape(QFrame.Shape.NoFrame)
-        self.sidebar.setSpacing(2)
+        # pages are tabs along the top; the left side holds the saved scraping sessions
+        self.tabs = QTabBar()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setExpanding(False)
+        self.tabs.setDrawBase(False)
+        self.tabs.setIconSize(QSize(20, 20))
+        self.tabs.setStyleSheet("QTabBar::tab { padding: 7px 14px; }")
         self.stack = QStackedWidget()
         for i, (title, names, fallback, cls) in enumerate(pages, 1):
-            item = QListWidgetItem(themed_icon(*names, fallback=fallback), title)
-            item.setSizeHint(QSize(170, 38))
-            self.sidebar.addItem(item)
+            self.tabs.addTab(themed_icon(*names, fallback=fallback), title)
+            self.tabs.setTabToolTip(i - 1, f"{title}  (Ctrl+{i})")
             self.stack.addWidget(cls(state))
             act = QAction(title, self)
             act.setShortcut(QKeySequence(f"Ctrl+{i}"))
-            act.triggered.connect(lambda _=False, n=i - 1: self.sidebar.setCurrentRow(n))
+            act.triggered.connect(lambda _=False, n=i - 1: self.tabs.setCurrentIndex(n))
             self.addAction(act)
-        self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.sidebar.setCurrentRow(0)
+        self.tabs.currentChanged.connect(self.stack.setCurrentIndex)
+        self.collect: CollectPage = self.stack.widget(0)
 
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.VLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        central = QWidget()
-        row = QHBoxLayout(central)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        row.addWidget(self.sidebar)
-        row.addWidget(line)
-        row.addWidget(self.stack, 1)
-        self.setCentralWidget(central)
+        self.sessions = SessionsPanel(self.collect.params)
+        self.sessions.setMinimumWidth(180)
+        self.sessions.sessionActivated.connect(self._open_session)
+        self.collect.paramsChanged.connect(lambda: self.sessions.update_current(self.collect.params()))
+        self.collect.started.connect(self._ensure_session)
+        new_session = QAction("New Session", self)
+        new_session.setShortcut(QKeySequence.StandardKey.New)
+        new_session.triggered.connect(lambda: self.sessions.new_session())
+
+        split = QSplitter()
+        split.addWidget(self.sessions)
+        split.addWidget(self.stack)
+        split.setStretchFactor(1, 1)
+        split.setSizes([230, 900])
+        split.setChildrenCollapsible(False)
+        self.setCentralWidget(split)
 
         # ---- actions ----
         choose = QAction(themed_icon("folder-open", "document-open", fallback=QStyle.StandardPixmap.SP_DirOpenIcon),
@@ -83,20 +90,27 @@ class MainWindow(QMainWindow):
 
         menu = self.menuBar()
         m_file = menu.addMenu("&File")
+        m_file.addAction(new_session)
+        m_file.addSeparator()
         m_file.addActions([choose, reveal])
         m_file.addSeparator()
         m_file.addAction(quit_act)
         menu.addMenu("&Settings").addAction(prefs)
         menu.addMenu("&Help").addAction(about)
 
-        # ---- library toolbar ----
-        bar = QToolBar("Library")
+        # ---- top bar: page tabs + library ----
+        bar = QToolBar("Navigation")
         bar.setMovable(False)
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        bar.addWidget(QLabel("  Library:  "))
+        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        bar.addWidget(self.tabs)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        bar.addWidget(spacer)
+        bar.addWidget(QLabel("Library: "))
         self.lib_edit = QLineEdit()
         self.lib_edit.setReadOnly(True)
-        self.lib_edit.setMinimumWidth(380)
+        self.lib_edit.setMinimumWidth(220)
+        self.lib_edit.setMaximumWidth(420)
         bar.addWidget(self.lib_edit)
         bar.addAction(choose)
         bar.addAction(reveal)
@@ -113,6 +127,15 @@ class MainWindow(QMainWindow):
         self.lib_edit.setText(self.state.library)
         up = get_upscaler()
         self.model_label.setText("Upscale model: " + (up.model_path.rsplit("/", 1)[-1] if up.model_path else "none") + "   ")
+
+    def _open_session(self, params: dict) -> None:
+        self.collect.set_params(params)
+        self.tabs.setCurrentIndex(0)
+
+    def _ensure_session(self) -> None:
+        """Every collection run is remembered as a session."""
+        if self.sessions.current_session() is None:
+            self.sessions.new_session()
 
     def choose_library(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose Library Folder", self.state.library)
@@ -138,4 +161,5 @@ class MainWindow(QMainWindow):
                 return
             TaskPanel.cancel_active()
             TaskPanel.wait_active()
+        self.sessions.save()
         event.accept()

@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from . import capabilities, paths
 from .settings import Settings
+from .similarity import SimilaritySpec, SimilarityFilter
 from .sink import ImageSink, SinkOptions
 from .tasks import TaskContext
 from .utils import clean_tag, safe_name
@@ -21,6 +22,9 @@ class CollectOptions:
     limit: int = 100                 # 0 = unlimited
     randomize: bool = False
     parallel: int = 4
+    safe_search_off: bool = False
+    filters: dict = field(default_factory=dict)          # group key -> [option values], see sources/filters.py
+    similarity: SimilaritySpec = field(default_factory=SimilaritySpec)
     sink: SinkOptions = field(default_factory=SinkOptions)
 
 
@@ -59,6 +63,14 @@ def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -
             != os.path.abspath(settings.library_path()):
         ctx.log("Invalid collection name.")
         return {}
+    if opts.similarity.enabled:
+        try:
+            opts.sink.similarity = SimilarityFilter(opts.similarity, ctx)
+        except Exception as exc:
+            ctx.log(f"Similarity filter unavailable: {exc}")
+            return {}
+        if ctx.cancelled:
+            return {}
     sink = ImageSink(save_dir, tag, opts.sink)
     ctx.log(f"Source: {opts.source}   Query: {query}")
     ctx.log(f"Destination: {save_dir}")

@@ -26,8 +26,13 @@ def main(argv=None) -> int:
     from .ui.main_window import MainWindow
     from .ui.state import AppState
 
-    QGuiApplication.setDesktopFileName(APP_ID)        # lets Wayland match the window to the .desktop entry
+    import os
+    flatpak_id = os.environ.get("FLATPAK_ID")
+    # matches the window to the .desktop entry (WM_CLASS on X11, app_id on Wayland)
+    QGuiApplication.setDesktopFileName(flatpak_id or APP_ID)
     app = QApplication([sys.argv[0], *qt_args])
+    if flatpak_id:
+        app.setStyle("Fusion")        # the sandbox has no desktop Qt style plugins; Fusion follows the palette
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setApplicationVersion(__version__)

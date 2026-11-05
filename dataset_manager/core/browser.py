@@ -72,8 +72,6 @@ async def apply_stealth(page) -> bool:
 @asynccontextmanager
 async def open_browser(settings: Settings, ctx: TaskContext, prefer_system: bool = False):
     """Yields (context, page) for a persistent browser profile."""
-    import random
-
     from playwright.async_api import async_playwright
 
     configure_environment()
@@ -84,7 +82,7 @@ async def open_browser(settings: Settings, ctx: TaskContext, prefer_system: bool
     ctx.log(f"Browser: {exe or 'Playwright bundled Chromium'} ({'headless' if headless else 'windowed'})")
     async with async_playwright() as p:
         kwargs = dict(user_data_dir=settings.profile_path(), headless=headless,
-                      viewport={"width": random.randint(1200, 1600), "height": random.randint(800, 1080)},
+                      no_viewport=True,   # real window size; an emulated viewport smaller than the window is a bot tell
                       args=["--disable-blink-features=AutomationControlled"],
                       ignore_default_args=["--enable-automation"])
         if exe:
@@ -97,8 +95,6 @@ async def open_browser(settings: Settings, ctx: TaskContext, prefer_system: bool
                 "Close other windows using the same profile, or run `playwright install chromium`, "
                 "or choose a browser in Preferences.") from e
         try:
-            await browser.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
             page = browser.pages[0] if browser.pages else await browser.new_page()
             if not await apply_stealth(page):
                 ctx.log("Tip: `pip install playwright-stealth` reduces bot detection.")

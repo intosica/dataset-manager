@@ -1,0 +1,57 @@
+# Flatpak manifest for Dataset Manager (X11 / Xorg session, e.g. COSMIC on Xorg). Build with ../build-flatpak.sh
+app-id: io.github.intosica.DatasetManager
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: dataset-manager
+finish-args:
+  - --socket=x11
+  - --share=ipc
+  - --device=dri
+  - --share=network                 # web image search
+  - --filesystem=home               # libraries, model folders, example folders
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=/mnt
+  - --env=QT_QPA_PLATFORM=xcb
+  - --env=PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright
+  - --env=DATASET_MANAGER_IN_FLATPAK=1
+modules:
+  # Python packages + Playwright's Chromium, fetched from PyPI / Playwright's CDN.
+  # ponytail: needs network during the build (fine for local builds, not accepted by Flathub;
+  # Flathub would need flatpak-pip-generator + pinned sources).
+  - name: python-deps
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+    build-commands:
+      - pip3 install --prefix=/app --no-cache-dir -r requirements.txt
+      - if [ -s extra-requirements.txt ]; then pip3 install --prefix=/app --no-cache-dir -r extra-requirements.txt; fi
+      - PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright python3 -m playwright install chromium
+    sources:
+      - type: file
+        path: ../requirements.txt
+      - type: file
+        path: extra-requirements.txt
+
+  - name: dataset-manager
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/dataset-manager
+      - cp -r dataset_manager /app/lib/dataset-manager/
+      - find /app/lib/dataset-manager -name __pycache__ -prune -exec rm -rf {} +
+      - install -Dm755 dataset-manager.sh /app/bin/dataset-manager
+      - install -Dm644 dataset_manager/resources/dataset-manager.svg /app/share/icons/hicolor/scalable/apps/io.github.intosica.DatasetManager.svg
+      - install -Dm644 io.github.intosica.DatasetManager.desktop -t /app/share/applications
+      - install -Dm644 io.github.intosica.DatasetManager.metainfo.xml -t /app/share/metainfo
+    sources:
+      - type: dir
+        path: ../dataset_manager
+        dest: dataset_manager
+      - type: file
+        path: dataset-manager.sh
+      - type: file
+        path: io.github.intosica.DatasetManager.desktop
+      - type: file
+        path: io.github.intosica.DatasetManager.metainfo.xml

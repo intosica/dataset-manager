@@ -14,15 +14,8 @@ from ..collector import CollectOptions
 from ..settings import Settings
 from ..sink import ImageSink
 from ..tasks import TaskContext
+from .filters import NO_SAFE_SEARCH, build_url, combos, describe
 
-SEARCH_URLS = {
-    "Bing": "https://www.bing.com/images/search?q={q}&qft=+filterui:imagesize-large",
-    "DuckDuckGo": "https://duckduckgo.com/?q={q}&iax=images&ia=images",
-    "Yahoo": "https://images.search.yahoo.com/search/images?p={q}",
-    "Yandex": "https://yandex.com/images/search?text={q}&isize=large",
-    "Pinterest": "https://www.pinterest.com/search/pins/?q={q}",
-    "Internet Archive": "https://archive.org/search?query={q}",
-}
 YANDEX_ITEM = ".SerpItem, .serp-item"          # SerpItem = current markup, serp-item = the old one
 
 YANDEX_JS = """(sel) => {
@@ -145,44 +138,6 @@ async def _wait_for_yandex_results(page, settings: Settings, ctx: TaskContext, t
     return False
 
 
-async def _human_move(page, x: float, y: float) -> None:
-    """Approach the target in two legs with a pause, so the pointer never travels in one dead-straight line."""
-    await page.mouse.move(x - random.randint(60, 200), y - random.randint(30, 130), steps=random.randint(8, 16))
-    await page.wait_for_timeout(random.randint(60, 200))
-    await page.mouse.move(x, y, steps=random.randint(12, 26))
-
-
-async def _human_click(page, selector: str) -> bool:
-    """Click slightly off-centre with real (trusted) mouse events, after a pointer move and a short dwell."""
-    try:
-        el = await page.query_selector(selector)
-        box = await el.bounding_box() if el else None
-        if not box:
-            return False
-        x = box["x"] + box["width"] * random.uniform(0.35, 0.65)
-        y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
-        await _human_move(page, x, y)
-        await page.wait_for_timeout(random.randint(120, 420))
-        await page.mouse.click(x, y)
-        return True
-    except Exception:
-        return False
-
-
-YANDEX_VIEWER_JS = """() => {
-    const src = i => i && i.naturalWidth > 100 ? (i.currentSrc || i.src) : '';
-    let url = '';
-    try { url = new URL(location.href).searchParams.get('img_url') || ''; } catch (e) {}
-    return {
-        url,
-        origin: src(document.querySelector('img[class*="MMImage-Origin"]')),
-        preview: src(document.querySelector('img[class*="MMImage-Preview"]')),
-    };
-}"""
-
-YANDEX_TILE = ".SerpItem a[href*='img_url='], .serp-item a"
-
-
 async def _fetch(page, *candidates: str):
     for cand in candidates:
         if not cand or not cand.startswith("http"):
@@ -197,75 +152,65 @@ async def _fetch(page, *candidates: str):
     return None
 
 
-async def _yandex_viewer(page, sink: ImageSink, ctx: TaskContext, limit: int) -> None:
-    """Open the first result and walk the viewer at a human pace, saving each full-size image."""
-    if not await _human_click(page, YANDEX_TILE):
-        return
-    await page.wait_for_timeout(random.randint(1500, 2800))
-    ctx.log("Stepping through the Yandex viewer...")
-    max_steps = limit * 3 if limit else 300
-    stuck = 0
-    for step in range(max_steps):
-        if ctx.cancelled or (limit and sink.counts["saved"] >= limit):
-            break
-        try:
-            info = await page.evaluate(YANDEX_VIEWER_JS)
-        except Exception:
-            break                             # viewer closed or the page navigated away
-        url = info.get("url") or info.get("origin") or ""
-        if not url or sink.is_seen(url):
-            stuck += 1
-            if stuck >= 5:
-                break
-        else:
-            stuck = 0
-            data = await _fetch(page, url, info.get("preview", ""))
-            if data:
-                name = f"image_{hashlib.md5(url.encode()).hexdigest()[:12]}"
-                if await asyncio.to_thread(sink.ingest, data, name) in ("saved", "duplicate"):
-                    sink.mark_seen(url)
-            done = sink.counts["saved"]
-            ctx.progress(done if limit else step + 1, limit or max_steps, f"{done} images saved")
-        await page.wait_for_timeout(random.randint(900, 1900))     # dwell on the image like a person would
-        await page.keyboard.press("ArrowRight")
-    try:
-        await page.keyboard.press("Escape")
-    except Exception:
-        pass
+async def _wait_captcha(page, settings: Settings, ctx: TaskContext, timeout_s: int = 300) -> bool:
+    """Robot check on screen: leave the window for the user to solve (we never auto-solve it). True once it clears."""
+    if settings.headless or not has_display():
+        return False
+    ctx.log("Yandex wants a robot check. Solve it in the browser window; collection resumes automatically.")
+    ctx.progress(0, 0, "Waiting for the robot check")
+    for _ in range(timeout_s):
+        if ctx.cancelled or page.is_closed():
+            return False
+        if "showcaptcha" not in page.url:
+            ctx.log("Robot check passed.")
+            return True
+        await page.wait_for_timeout(1000)
+    return False
 
 
-async def _yandex_pages(page, url: str, want: int, ctx: TaskContext):
-    """Walk the result pages with ?p=N. Yandex's own "Show more" button always ends in a robot check."""
-    raw, fallbacks, seen, empty, blocked = [], {}, set(), 0, 0
-    for p in range(25):                     # ponytail: 25 pages ≈ 750 candidates; raise if anyone needs more
+# Yandex serves the first 30 results of any search freely, but every further page (?p=N, "Show more", or walking
+# past the end in the viewer) is a robot check, every time, even after solving one. A filter variant is a new search,
+# so its first page is free too and holds a largely different 30: ~20 new images per variant.
+_ORIENT = ["&iorient=horizontal", "&iorient=vertical", "&iorient=square"]
+_COLOR = [f"&icolor={c}" for c in ("gray", "red", "orange", "yellow", "green", "cyan", "blue", "violet", "white", "black")]
+YANDEX_VARIANTS = _ORIENT + ["&type=clipart", "&type=lineart"] + _COLOR + [o + c for o in _ORIENT for c in _COLOR]
+
+
+async def _yandex_variants(page, urls: list[str], want: int, ctx: TaskContext, settings: Settings):
+    """Read the first result page of each URL; urls[0] is already loaded."""
+    raw, fallbacks, seen, dry, blocked = [], {}, set(), 0, 0
+    for i, url in enumerate(urls):
         if ctx.cancelled:
             break
-        page_url = url if p == 0 else f"{url}&p={p}"
-        try:
-            await page.goto(page_url, wait_until="domcontentloaded")
-        except Exception as exc:
-            ctx.log(f"Could not load page {p + 1}: {str(exc).splitlines()[0]}")
-            continue
-        await page.wait_for_timeout(random.randint(1200, 2400))
-        await _wait_tiles(page)
-        if "showcaptcha" in page.url:
-            blocked += 1
-            ctx.log(f"Page {p + 1} came back as a robot check; skipping it.")
-            if blocked >= 2:
-                ctx.log(f"Yandex keeps asking for a robot check; keeping the {len(raw)} images found so far.")
-                break
-            continue
-        blocked = 0
-        found = 0
+        if i:
+            await page.wait_for_timeout(random.randint(2500, 6000))     # unhurried, like someone trying filters
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+            except Exception as exc:
+                ctx.log(f"Could not load a result page: {str(exc).splitlines()[0]}")
+                continue
+            await _wait_tiles(page)
+            if "showcaptcha" in page.url and await _wait_captcha(page, settings, ctx):
+                await _wait_tiles(page)
+            if "showcaptcha" in page.url:
+                blocked += 1
+                if blocked >= 2:
+                    ctx.log(f"Yandex keeps asking for a robot check; keeping the {len(raw)} images found so far.")
+                    break
+                continue
+            blocked = 0
+            for _ in range(random.randint(2, 4)):                     # glance down the page
+                await page.mouse.wheel(0, random.randint(300, 700))
+                await page.wait_for_timeout(random.randint(250, 700))
         try:
             extracted = await page.evaluate(YANDEX_JS, YANDEX_ITEM)
         except Exception:
-            await _wait_tiles(page)               # the page reloaded under us; give it a moment and retry
+            await _wait_tiles(page)                                     # the page reloaded under us
             try:
                 extracted = await page.evaluate(YANDEX_JS, YANDEX_ITEM)
             except Exception:
-                ctx.log(f"Page {p + 1} would not settle; moving on.")
                 continue
+        found = 0
         for original, preview in extracted:
             best = original or preview      # full-size image, falling back to Yandex's own preview
             if best and best not in seen:
@@ -274,13 +219,30 @@ async def _yandex_pages(page, url: str, want: int, ctx: TaskContext):
                 found += 1
                 if original and preview and original != preview:
                     fallbacks[original] = preview
-        ctx.log(f"Page {p + 1}: {found} images ({len(raw)} so far).")
-        empty = empty + 1 if not found else 0
-        if want and len(raw) >= want:
-            break
-        if empty >= 2:
+        ctx.log(f"Result set {i + 1}: {found} new images ({len(raw)} so far).")
+        ctx.progress(0, 0, f"Reading results: {len(raw)} found")
+        dry = dry + 1 if found < 3 else 0
+        if (want and len(raw) >= want) or (dry >= 4 and len(urls) > 8):
             break
     return raw, fallbacks
+
+
+async def _yandex_safe_search(page, off: bool, ctx: TaskContext) -> None:
+    """Set Yandex's "Filter search results" to No filter / Moderate. It lives in the browser profile, so it is applied
+    on every run; with the filter on, Yandex blurs adult results and a robot clicking blurred tiles gets captchas."""
+    want = "free" if off else "mild"
+    try:
+        await page.goto("https://yandex.com/tune/search/", wait_until="domcontentloaded")
+        if await page.query_selector("input[name=filter_search_results]") is None:
+            return ctx.log("Could not reach Yandex's search settings; leaving safe search as it is.")
+        if await page.evaluate("v => document.querySelector(`input[name=filter_search_results][value=${v}]`).checked", want):
+            return
+        await page.get_by_text("No filter" if off else "Moderate search", exact=True).click()
+        await page.click(".button-save__button")
+        await page.wait_for_timeout(random.randint(1200, 2200))
+        ctx.log(f"Yandex safe search: {'off' if off else 'moderate'}.")
+    except Exception as exc:
+        ctx.log(f"Could not change Yandex safe search: {str(exc).splitlines()[0]}")
 
 
 async def _debug_shot(page, ctx: TaskContext) -> None:
@@ -356,6 +318,27 @@ async def _extract_urls(page, engine: str, query: str, direct_ia: bool, cap: int
 
 
 
+async def _safe_search_off(page, engine: str, query: str, ctx: TaskContext) -> None:
+    """Safe search off for engines that keep it as a preference; the URL parameter alone is not always honoured."""
+    try:
+        if engine == "Bing":
+            await page.context.add_cookies([{"name": "SRCHHPGUSR", "value": "ADLT=OFF", "domain": ".bing.com", "path": "/"}])
+        elif engine == "DuckDuckGo":
+            await page.context.add_cookies([{"name": "p", "value": "-2", "domain": ".duckduckgo.com", "path": "/"}])
+        elif engine == "Yahoo":       # the "SafeSearch off" menu entry is a link that stores the preference
+            await page.goto(build_url("Yahoo", query, {}), wait_until="domcontentloaded")
+            href = await page.evaluate("""() => { const a = [...document.querySelectorAll('a[href*="vm=p"]')]
+                .find(a => /safesearch off/i.test(a.textContent)); return a ? a.href : ''; }""")
+            if href:
+                await page.goto(href, wait_until="domcontentloaded")
+                await page.wait_for_timeout(random.randint(800, 1600))
+        elif engine in NO_SAFE_SEARCH:
+            return ctx.log(f"{engine} has no safe-search setting; nothing to turn off.")
+        ctx.log(f"{engine} safe search: off.")
+    except Exception as exc:
+        ctx.log(f"Could not turn off {engine} safe search: {str(exc).splitlines()[0]}")
+
+
 async def run(query: str, opts: CollectOptions, settings: Settings, sink: ImageSink, ctx: TaskContext) -> None:
     engine = opts.source
     direct_pin = query.startswith("http") and "pinterest." in query.lower()
@@ -365,12 +348,54 @@ async def run(query: str, opts: CollectOptions, settings: Settings, sink: ImageS
     elif direct_ia:
         engine = "Internet Archive"
     limit = int(opts.limit)
+    sets = [{}] if (direct_pin or direct_ia) else combos(engine, opts.filters or {})
+    urls_to_visit = [query] if (direct_pin or direct_ia) else [build_url(engine, query, c, opts.safe_search_off) for c in sets]
+    if len(sets) > 1:
+        ctx.log(f"{len(sets)} filter combinations; visiting them in random order.")
 
     async with open_browser(settings, ctx, prefer_system=(engine == "Yandex")) as (_browser, page):
-        url = query if (direct_pin or direct_ia) else SEARCH_URLS.get(engine, SEARCH_URLS["Bing"]).format(q=quote(query))
+        async def fetch(u: str):
+            return await _fetch(page, u, *([fallbacks[u]] if u in fallbacks else []))
+
+        async def download(raw: list[str], cap: int) -> None:
+            """Fetch and save candidates until `cap` images are saved in total (0 = no cap)."""
+            urls = [u for u in dict.fromkeys(raw) if u and u.startswith("http")
+                    and not (JUNK_URL.search(u) and "archive.org/services/img/" not in u)]
+            if opts.randomize:
+                random.shuffle(urls)
+            if raw:
+                ctx.log(f"{len(urls)} candidate images found.")
+            parallel, i = max(1, int(opts.parallel)), 0
+            while i < len(urls) and not ctx.cancelled:
+                if cap and sink.counts["saved"] >= cap:
+                    break
+                batch = [u for u in urls[i:i + parallel] if not sink.is_seen(u)]
+                i += parallel
+                for data, u in zip(await asyncio.gather(*(fetch(u) for u in batch)), batch):
+                    if cap and sink.counts["saved"] >= cap:
+                        break
+                    if not data:
+                        continue
+                    name = f"image_{hashlib.md5(u.encode()).hexdigest()[:12]}"
+                    status = await asyncio.to_thread(sink.ingest, data, name)
+                    if status in ("saved", "duplicate", "rejected"):
+                        sink.mark_seen(u)
+                done = sink.counts["saved"]
+                ctx.progress(done if limit else min(i, len(urls)), limit or len(urls), f"{done} images saved")
+
+        fallbacks: dict = {}
+        if opts.safe_search_off and engine != "Yandex" and not (direct_pin or direct_ia):
+            await _safe_search_off(page, engine, query, ctx)
+        if engine == "Yandex":
+            await _yandex_safe_search(page, opts.safe_search_off, ctx)
+            if sets == [{}]:                    # no filters chosen: walk our own variants for more than 30 results
+                variants = YANDEX_VARIANTS[:]
+                if opts.randomize:
+                    random.shuffle(variants)
+                urls_to_visit += [urls_to_visit[0] + v for v in variants]
         ctx.progress(0, 0, "Loading page")
         ctx.log("Loading page...")
-        await page.goto(url, wait_until="domcontentloaded")
+        await page.goto(urls_to_visit[0], wait_until="domcontentloaded")
         await page.wait_for_timeout(random.randint(2500, 4000))
         if engine == "Yandex":
             if not await _wait_for_yandex_results(page, settings, ctx):
@@ -378,45 +403,26 @@ async def run(query: str, opts: CollectOptions, settings: Settings, sink: ImageS
                     await _debug_shot(page, ctx)
                     ctx.log("Yandex did not show any results.")
                 return
-            ctx.progress(0, 0, "Opening the first result")
-            await _yandex_viewer(page, sink, ctx, limit)
-            raw, fallbacks = [], {}
-            if not ctx.cancelled and (not limit or sink.counts["saved"] < limit):
-                ctx.progress(0, 0, "Reading result pages")
-                raw, fallbacks = await _yandex_pages(page, url, limit * 2 if limit else 0, ctx)
-        else:
-            ctx.progress(0, 0, "Scrolling for more results")
-            await _auto_scroll(page, engine, limit, ctx)
-            raw, fallbacks = await _extract_urls(page, engine, query, direct_ia, limit * 3 if limit else 0, ctx)
-        urls = []
-        for u in dict.fromkeys(raw):
-            if not u or not u.startswith("http"):
-                continue
-            if JUNK_URL.search(u) and "archive.org/services/img/" not in u:
-                continue
-            urls.append(u)
-        if opts.randomize:
-            random.shuffle(urls)
-        if raw:
-            ctx.log(f"{len(urls)} candidate images found.")
+            want = limit * (4 if opts.randomize else 2) if limit else 0     # randomize: draw from a wider pool
+            raw, fallbacks = await _yandex_variants(page, urls_to_visit, want, ctx, settings)
+            return await download(raw, limit)
 
-        async def fetch(u: str):
-            return await _fetch(page, u, *([fallbacks[u]] if u in fallbacks else []))
-
-        parallel, i = max(1, int(opts.parallel)), 0
-        while i < len(urls) and not ctx.cancelled:
-            if limit and sink.counts["saved"] >= limit:
+        for n, (url, combo) in enumerate(zip(urls_to_visit, sets)):
+            if ctx.cancelled or (limit and sink.counts["saved"] >= limit):
                 break
-            batch = [u for u in urls[i:i + parallel] if not sink.is_seen(u)]
-            i += parallel
-            for data, u in zip(await asyncio.gather(*(fetch(u) for u in batch)), batch):
-                if limit and sink.counts["saved"] >= limit:
-                    break
-                if not data:
+            if n:
+                await page.wait_for_timeout(random.randint(1500, 4000))
+                try:
+                    await page.goto(url, wait_until="domcontentloaded")
+                except Exception as exc:
+                    ctx.log(f"Could not load a result page: {str(exc).splitlines()[0]}")
                     continue
-                name = f"image_{hashlib.md5(u.encode()).hexdigest()[:12]}"
-                status = await asyncio.to_thread(sink.ingest, data, name)
-                if status in ("saved", "duplicate"):
-                    sink.mark_seen(u)
-            done = sink.counts["saved"]
-            ctx.progress(done if limit else min(i, len(urls)), limit or len(urls), f"{done} images saved")
+                await page.wait_for_timeout(random.randint(1500, 3000))
+            if len(sets) > 1:
+                ctx.log(f"Filter set {n + 1}/{len(sets)}: {describe(engine, combo)}")
+            share = -(-(limit - sink.counts["saved"]) // (len(sets) - n)) if limit else 0   # fair share of what is left
+            ctx.progress(0, 0, "Scrolling for more results")
+            await _auto_scroll(page, engine, share, ctx)
+            raw, more = await _extract_urls(page, engine, query, direct_ia, share * 3, ctx)
+            fallbacks.update(more)
+            await download(raw, sink.counts["saved"] + share if limit else 0)

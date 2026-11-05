@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.intosica.DatasetManager</id>
+  <name>Dataset Manager</name>
+  <summary>Collect, organize, caption and de-duplicate image datasets</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <description>
+    <p>Scrape image search engines into a training dataset with saved sessions, multi-choice search filters,
+    an example-based similarity filter, captions, resizing and duplicate detection.</p>
+  </description>
+  <launchable type="desktop-id">io.github.intosica.DatasetManager.desktop</launchable>
+  <url type="homepage">https://github.com/intosica/dataset-manager</url>
+</component>

@@ -28,6 +28,8 @@ class SinkOptions:
     duplicate_threshold: int = 6
     write_captions: bool = True
     caption: CaptionSpec = field(default_factory=CaptionSpec)
+    sort_by_orientation: bool = True     # save into Landscape / Portrait / Square sub-folders
+    similarity: object = None            # SimilarityFilter or None
 
 
 class ImageSink:
@@ -75,7 +77,7 @@ class ImageSink:
 
     # ---- ingest ----
     def ingest(self, data: bytes, name: str) -> str:
-        """Returns: saved | exists | duplicate | small | invalid"""
+        """Returns: saved | exists | duplicate | small | rejected | invalid"""
         status = self._ingest(data, name)
         self.counts[status] += 1
         return status
@@ -91,10 +93,12 @@ class ImageSink:
                 return "duplicate"
             with Image.open(io.BytesIO(data)) as im:
                 img = im.convert("RGB")
+            if self.opts.similarity is not None and not self.opts.similarity.keep(img):
+                return "rejected"
             if self.opts.resize:
                 img = resize_image(img, self.opts.target_dim, self.opts.direction, self.opts.snap_to_64)
             fld = orientation(*img.size)
-            folder = os.path.join(self.save_dir, fld)
+            folder = os.path.join(self.save_dir, fld) if self.opts.sort_by_orientation else self.save_dir
             os.makedirs(folder, exist_ok=True)
             save_image(img, os.path.join(folder, f"{name}.jpg"))
             if self.opts.write_captions:
@@ -112,4 +116,4 @@ class ImageSink:
     def summary(self) -> str:
         c = self.counts
         return (f"{c['saved']} saved, {c['duplicate'] + c['exists']} duplicates skipped, {c['small']} too small, "
-                f"{c['invalid']} unreadable")
+                f"{c['invalid']} unreadable" + (f", {c['rejected']} rejected by similarity" if c['rejected'] else ""))

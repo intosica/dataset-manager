@@ -11,7 +11,11 @@ FEATURES = {
     "bs4": ("ArtofMTG source", "pip install beautifulsoup4"),
     "torch": ("AI upscaling, GPU support", "pip install torch"),
     "spandrel": ("AI upscaling models", "pip install spandrel"),
-    "transformers": ("Low-quality (aesthetic) detection", "pip install transformers"),
+    "transformers": ("Low-quality (aesthetic) detection, TinyCLIP similarity", "pip install transformers"),
+    "onnxruntime": ("Similarity filter: imgbeddings backend (with transformers)", "pip install onnxruntime transformers"),
+    "imageprism": ("Similarity filter: imageprism backends", "pip install imageprism"),
+    "open_clip": ("Similarity filter: OpenCLIP backend", "pip install open_clip_torch"),
+    "torchvision": ("Similarity filter: MobileNet backend", "pip install torchvision"),
 }
 
 

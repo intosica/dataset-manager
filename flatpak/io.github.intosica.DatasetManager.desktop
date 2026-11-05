@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dataset Manager
+GenericName=Image Dataset Manager
+Comment=Collect, organize, caption and de-duplicate image datasets
+Exec=dataset-manager
+Icon=io.github.intosica.DatasetManager
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=images;dataset;captions;duplicates;upscale;scraper;
+StartupNotify=true
+StartupWMClass=io.github.intosica.DatasetManager

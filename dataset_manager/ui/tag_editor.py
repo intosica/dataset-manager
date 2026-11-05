@@ -70,7 +70,9 @@ class TagEditor(Gtk.Box):
         self.count = Gtk.Label(css_classes=["dim-label", "numeric"])
         self.recursive = Gtk.CheckButton(label="Subfolders", active=True)
         self.recursive.connect("toggled", lambda _b: self.reload())
-        for w in (open_btn, lib_btn, self.reload_btn, self.recursive, self.search, self.count):
+        self.save_all_btn = Gtk.Button(label="Save All Tags", sensitive=False)
+        self.save_all_btn.connect("clicked", lambda _b: self.save_all())
+        for w in (open_btn, lib_btn, self.reload_btn, self.recursive, self.search, self.count, self.save_all_btn):
             bar.append(w)
 
         # ---- grid ----
@@ -127,6 +129,7 @@ class TagEditor(Gtk.Box):
         self.append(self.toasts)
         self._selection_changed()
         self.connect("unrealize", lambda _w: self._flush())
+        self.connect("map", self._first_map)
         state.library_selected.connect(self._library_selected)
 
     def _library_selected(self, path: str) -> None:
@@ -141,7 +144,6 @@ class TagEditor(Gtk.Box):
         if self._save_id:
             GLib.source_remove(self._save_id)
             self._save_settings()
-        self.connect("map", self._first_map)
 
     def _first_map(self, _w) -> None:
         # reopen the last folder only when the tab is first shown, so start-up stays fast
@@ -159,16 +161,27 @@ class TagEditor(Gtk.Box):
         g = Adw.PreferencesGroup(title="Caption")
         self.preview = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, height_request=260, can_shrink=True)
         self.preview.add_css_class("card")
+        self.preview.set_tooltip_text("Double-click for a closer look")
+        dbl = Gtk.GestureClick()
+        dbl.connect("pressed", lambda _g, n, _x, _y: self._zoom() if n == 2 else None)
+        self.preview.add_controller(dbl)
         self.cap_name = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["dim-label"])
         self.cap_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=8, bottom_margin=8,
                                      left_margin=8, right_margin=8, height_request=110)
         self.cap_buf = self.cap_view.get_buffer()
         self.cap_buf.connect("changed", lambda _b: self._cap_edited())
-        frame = Gtk.ScrolledWindow(child=self.cap_view, css_classes=["card"], max_content_height=240,
-                                   propagate_natural_height=True)
-        self.save_btn = Gtk.Button(label="Save Tags", css_classes=["suggested-action"], sensitive=False)
-        self.save_btn.set_tooltip_text("Write every changed caption to disk · Ctrl+S")
-        self.save_btn.connect("clicked", lambda _b: self.save_all())
+        frame = Gtk.ScrolledWindow(child=self.cap_view, css_classes=["card"], min_content_height=120)
+        # drag the grip under the box to make it taller or shorter
+        grip = Gtk.Image(icon_name="list-drag-handle-symbolic", css_classes=["dim-label"],
+                         tooltip_text="Drag to resize the caption box")
+        grip.set_cursor(Gdk.Cursor.new_from_name("ns-resize"))
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", lambda *_a: setattr(self, "_grip_h", frame.get_min_content_height()))
+        drag.connect("drag-update", lambda _g, _x, dy: frame.set_min_content_height(max(60, int(self._grip_h + dy))))
+        grip.add_controller(drag)
+        self.save_btn = Gtk.Button(label="Save Tags", sensitive=False)
+        self.save_btn.set_tooltip_text("Write this image's caption to disk")
+        self.save_btn.connect("clicked", lambda _b: self.save_all(only=self.current))
         self.revert_btn = Gtk.Button(label="Revert", sensitive=False)
         self.revert_btn.connect("clicked", lambda _b: self._revert_current())
         self.trash_btn = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Move the selected images to the Trash")
@@ -179,7 +192,7 @@ class TagEditor(Gtk.Box):
         for b in (self.trash_btn, self.revert_btn, self.save_btn):
             row.append(b)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        for w in (self.preview, frame, row):
+        for w in (self.preview, frame, grip, row):
             box.append(w)
         g.add(box)
         keys = Gtk.EventControllerKey()
@@ -382,6 +395,8 @@ class TagEditor(Gtk.Box):
                     return
                 if rid == "save":
                     self.save_all()
+                elif rid == "discard":
+                    self._discard()
                 self._open(folder, remember)
             alert(self.get_root(), f"Save {n} unsaved caption{'s' if n != 1 else ''} first?",
                   "They belong to the folder you are leaving.",
@@ -517,12 +532,23 @@ class TagEditor(Gtk.Box):
 
     def _update_save_ui(self) -> None:
         n = self.unsaved()
-        self.save_btn.set_label(f"Save Tags ({n:,})" if n else "Save Tags")
-        self.save_btn.set_sensitive(n > 0)
-        self.save_btn.set_tooltip_text(f"Write {n:,} changed caption{'s' if n != 1 else ''} to disk · Ctrl+S" if n
-                                       else "Every caption is saved")
         cur = self.current
-        self.revert_btn.set_sensitive(bool(cur) and self.captions.get(cur, []) != self._disk.get(cur, []))
+        cur_dirty = bool(cur) and self.captions.get(cur, []) != self._disk.get(cur, [])
+        self.save_all_btn.set_label(f"Save All Tags ({n:,})" if n else "Save All Tags")
+        self.save_all_btn.set_sensitive(n > 0)
+        self.save_all_btn.set_tooltip_text(f"Write {n:,} changed caption{'s' if n != 1 else ''} to disk · Ctrl+S"
+                                           if n else "Every caption is saved")
+        # highlight only when there really is something to save; an insensitive blue button reads as "unsaved"
+        for b, on in ((self.save_all_btn, n > 0), (self.save_btn, cur_dirty)):
+            (b.add_css_class if on else b.remove_css_class)("suggested-action")
+        self.save_btn.set_sensitive(cur_dirty)
+        self.revert_btn.set_sensitive(cur_dirty)
+
+    def _discard(self) -> None:
+        """Drop every staged edit (the caption box included) and go back to what is on disk."""
+        self.captions = dict(self._disk)
+        self._show_caption()
+        self._refresh_cells()
 
     def _stage(self, new: dict[str, list[str]], refresh: bool = True) -> int:
         """Keep caption changes in memory; only Save Tags and the close prompt write them."""
@@ -552,11 +578,14 @@ class TagEditor(Gtk.Box):
         self._stage({p: self._disk.get(p, [])})
         self._show_caption()
 
-    def save_all(self) -> int:
+    def save_all(self, only: str | None = None) -> int:
+        """Write every staged caption, or just `only`'s."""
         self.save_current()
         pending = self.dirty()
+        if only:
+            pending = {only: pending[only]} if only in pending else {}
         if not pending:
-            self.save_btn.set_sensitive(False)
+            self._update_save_ui()
             return 0
         failed = []
         for p, tags in pending.items():
@@ -575,6 +604,28 @@ class TagEditor(Gtk.Box):
             self._toast(f"Saved {saved:,} caption{'s' if saved != 1 else ''}.")
             self._fill_tags()
         return saved
+
+    def _zoom(self) -> None:
+        """Closer look at the current image in a dialog (X or Escape closes it)."""
+        p = self.current
+        if not p:
+            return
+        pic = Gtk.Picture(content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, vexpand=True, hexpand=True,
+                          paintable=self.preview.get_paintable())          # the preview until the full image loads
+        view = Adw.ToolbarView(content=pic)
+        view.add_top_bar(Adw.HeaderBar(title_widget=Adw.WindowTitle(title=os.path.basename(p))))
+        root = self.get_root()
+        w, h = root.get_width(), root.get_height()
+        dlg = Adw.Dialog(child=view, content_width=int(w * 0.85), content_height=int(h * 0.9))
+
+        def job():
+            t = make_thumbnail(p, 2048)
+            try:
+                return Gdk.Texture.new_from_filename(t) if t else None
+            except GLib.Error:
+                return None
+        run_background(job, lambda tex: pic.set_paintable(tex) if tex else None)
+        dlg.present(root)
 
     def _cap_key(self, _c, keyval, _code, mods) -> bool:
         if keyval == Gdk.KEY_s and mods & Gdk.ModifierType.CONTROL_MASK:
@@ -634,7 +685,7 @@ class TagEditor(Gtk.Box):
         n = self._stage(changed)
         self.undo_btn.set_sensitive(True)
         self._show_caption()
-        self._toast(f"Changed {n:,} captions · press Save Tags to write them.")
+        self._toast(f"Changed {n:,} captions · press Save All Tags to write them.")
         for row in (self.add_row, self.remove_row):
             if (op == "add" and row is self.add_row) or (op == "remove" and row is self.remove_row):
                 row.set_text("")
@@ -789,7 +840,7 @@ class TagEditor(Gtk.Box):
                 new = tagedit.merge(old[f], list(tags), mode)
                 if new is not None and new != old[f]:
                     out[f] = new
-            ctx.log(f"Tagged {len(out):,} images — press Save Tags to write them.")
+            ctx.log(f"Tagged {len(out):,} images — press Save All Tags to write them.")
             return out
 
         def done(out):
@@ -833,7 +884,7 @@ class TagEditor(Gtk.Box):
             self._undo = {f: old[f] for f in written}
             self.undo_btn.set_sensitive(bool(written))
             self._fill_tags()
-            self.panel.log(f"Captioned {len(written):,} images — press Save Tags to write them.")
+            self.panel.log(f"Captioned {len(written):,} images — press Save All Tags to write them.")
         self.panel.run(lambda ctx: joycaption.caption_files(s, files, ctx, one), done, name="JoyCaption")
 
     def _caption_done(self, f: str, new: list[str]) -> None:

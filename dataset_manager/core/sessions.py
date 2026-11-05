@@ -16,7 +16,7 @@ from . import paths
 FILE = "sessions.json"
 
 
-@dataclass
+@dataclass(eq=False)       # identity comparison: `node in children` must not deep-compare trees
 class Node:
     kind: str                                   # "session" | "folder"
     name: str

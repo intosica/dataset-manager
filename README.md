@@ -48,7 +48,7 @@ The pages are in the header bar (Ctrl+1 … Ctrl+5); the left sidebar holds your
 | Library | Per-collection statistics and thumbnail previews |
 | Duplicates | Exact + near-duplicate finder; review groups, then move to Trash or delete |
 | Maintenance | Optional steps: dedupe, sort, rename, JPEG, resize, low-quality flagging, captions |
-| Tag Tools | Bulk caption / tag editing |
+| Tag Tools | **Tag Editor**: browse a dataset, filter by tags, edit captions one by one or in batches, auto-tag (JTP Hydra 3.5, WD EVA02 Large v3) and caption with JoyCaption. **Imageboard Upload Helper**: turns tag lists into imageboard upload format |
 
 The window adapts to narrow sizes: the sidebar collapses and the page switcher moves to the bottom.
 

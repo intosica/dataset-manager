@@ -49,7 +49,10 @@ def _process_image(path: str, root: str, tag: str, o: OrganizeOptions, stats: di
     was_low = any(d in LOW_QUALITY_DIRS for d in rel_dirs)
     with Image.open(path) as im:
         is_jpeg = (im.format or "").upper() == "JPEG"
-        img = im.convert("RGB")
+        size = im.size
+        # decoding is the slow part; move/rename/caption-only runs just need the header
+        need_pixels = o.detect_low_quality or o.resize or (o.convert_to_jpg and not is_jpeg)
+        img = im.convert("RGB") if need_pixels else None
 
     low = detector.is_low_quality(img, o.low_quality_strictness) if o.detect_low_quality else was_low
 
@@ -59,7 +62,7 @@ def _process_image(path: str, root: str, tag: str, o: OrganizeOptions, stats: di
         if new.size != img.size:
             img, resized = new, True
             stats["resized"] += 1
-    fld = orientation(*img.size)
+    fld = orientation(*(img.size if img is not None else size))
 
     if o.sort_by_orientation:
         t_dir = os.path.join(root, fld, LOW_QUALITY_DIR) if low else os.path.join(root, fld)
@@ -96,7 +99,11 @@ def _process_image(path: str, root: str, tag: str, o: OrganizeOptions, stats: di
 
     # captions always travel with their image
     old_txt, new_txt = os.path.splitext(path)[0] + ".txt", os.path.splitext(dest)[0] + ".txt"
-    if os.path.isfile(old_txt) and os.path.abspath(old_txt) != os.path.abspath(new_txt) and not os.path.exists(new_txt):
+    if os.path.isfile(old_txt) and os.path.abspath(old_txt) != os.path.abspath(new_txt) and not (
+            os.path.exists(new_txt) and os.path.samefile(old_txt, new_txt)):
+        # dest's stem is unique among images, so a .txt already there is an orphan: the image's own caption wins
+        if os.path.exists(new_txt):
+            os.replace(new_txt, new_txt + ".orphan")      # kept (renamed), never silently deleted
         shutil.move(old_txt, new_txt)
     if o.caption_mode != "off":
         caption = render_caption(o.caption, tag, fld, low)

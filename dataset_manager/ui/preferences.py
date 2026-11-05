@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from ..core import capabilities, paths, pkgs
+from ..core import capabilities, models, paths, pkgs
 from ..core.browser import find_browser
-from .widgets import CaptionEditor, ModelPicker, NoteRow, PathRow, TaskPanel, hint, icon_button
+from .widgets import CaptionEditor, ModelPicker, NoteRow, PathRow, TaskPanel, alert, hint, icon_button, run_background
 
 DIRECTIONS = [("Enlarge and shrink", "both"), ("Enlarge only", "up"), ("Shrink only", "down")]
 
@@ -31,6 +31,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.headless = Adw.SwitchRow(title="Run the browser without a window", active=s.headless)
         g1 = Adw.PreferencesGroup(title="Library")
         g1.add(self.library)
+        self.follow = Adw.SwitchRow(title="Tag Editor follows the Library page",
+                                    subtitle="Open whichever collection is selected on the Library page.",
+                                    active=s.tag_editor_follow_library)
+        g1.add(self.follow)
         g2 = Adw.PreferencesGroup(title="Browser", description="Used for image searches.")
         for w in (self.browser, self.profile, self.headless):
             g2.add(w)
@@ -39,7 +43,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
         general.add(g2)
         for row in (self.library, self.browser, self.profile):
             _apply_row(row, self._general_changed)
-        self.headless.connect("notify::active", lambda *_: self._general_changed())
+        for w in (self.headless, self.follow):
+            w.connect("notify::active", lambda *_: self._general_changed())
 
         # ---- Upscaling ----
         self.target = Adw.SpinRow.new_with_range(64, 8192, 64)
@@ -72,12 +77,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         cap.add(self.captions)
 
         # ---- System ----
-        sysp = Adw.PreferencesPage(title="System", icon_name="computer-symbolic")
+        sysp = Adw.PreferencesPage(title="System", icon_name="computer-symbolic", name="system")
         for g in self._system_groups():
             sysp.add(g)
         sysp.add(self._locations)
 
-        for p in (general, up, cap, sysp):
+        for p in (general, up, cap, self._models_page(), sysp):
             self.add(p)
 
     # ---- apply ----
@@ -86,6 +91,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         lib_changed = s.library_dir != self.library.get_text()
         s.library_dir, s.browser_path = self.library.get_text(), self.browser.get_text()
         s.browser_profile_dir, s.headless = self.profile.get_text(), self.headless.get_active()
+        s.tag_editor_follow_library = self.follow.get_active()
         self.state.save()
         if lib_changed:
             self.state.library_changed.emit()
@@ -213,43 +219,172 @@ class PreferencesDialog(Adw.PreferencesDialog):
             self._feature_rows.append(row)
 
     def _install(self, module: str) -> None:
-        dlg = InstallDialog(self.state, module, self._fill_features)
-        dlg.present(self.get_root() if isinstance(self.get_root(), Gtk.Widget) else None)
-
-
-class InstallDialog(Adw.Dialog):
-    """Runs pip (and any post-install step) for one optional component, with a live log."""
-
-    def __init__(self, state, module: str, on_done=None):
         f = capabilities.FEATURES[module]
-        super().__init__(title=f"Install {f['pip'][0]}", content_width=620, content_height=440)
-        self.state, self.module, self.on_done = state, module, on_done
+        s = self.state.settings
+
+        def job(ctx):
+            ok = pkgs.install(s, f["pip"], ctx, extra_index=f.get("extra_index", ""))
+            if ok and f.get("post"):
+                ok = pkgs.run_extra(f["post"], ctx, settings=s)
+            capabilities.refresh()
+            return ok
+
+        def done(_ok):
+            self.state.settings_changed.emit()
+            self._fill_features()
+            self._fill_models()
+        JobDialog(f"Install {f['pip'][0]}", pkgs.describe_target(s), job, done).present(self)
+
+    # ---- models ----
+    def _models_page(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage(title="Models", icon_name="system-search-symbolic", name="models")
+        self._model_groups = []
+        tag = Adw.PreferencesGroup(
+            title="Tagging and captioning",
+            description="Pick the folder (or file) each model lives in — an existing folder from another tool works. "
+                        "Download saves into that folder, or into the app's own data folder when it is empty.")
+        self._model_rows = {}
+        for key in ("hydra", "wd", "joycaption"):
+            m = models.MODELS[key]
+            row = PathRow(m["name"] if key != "joycaption" else "JoyCaption",
+                          mode="dir", placeholder=str(models.location(key, self.state.settings)))
+            row.set_text(getattr(self.state.settings, m["setting"]))
+            _apply_row(row, lambda k=key, r=row: self._model_path_changed(k, r))
+            tag.add(row)
+            note = NoteRow()
+            tag.add(note)
+            self._model_rows[key] = (row, note)
+        page.add(tag)
+
+        self.dl_group = Adw.PreferencesGroup(title="Downloads", description="From Hugging Face; interrupted downloads resume.")
+        page.add(self.dl_group)
+        self._dl_rows = []
+
+        self.cache_row = PathRow("Cache folder for CLIP, similarity and aesthetic models",
+                                 placeholder="App cache (default)")
+        self.cache_row.set_text(self.state.settings.hf_cache_dir)
+        _apply_row(self.cache_row, self._cache_changed)
+        self.cache_note = NoteRow()
+        other = Adw.PreferencesGroup(title="Other models",
+                                     description="Fetched by their libraries on first use. Download them now so the "
+                                                 "first collection doesn't stall.")
+        other.add(self.cache_row)
+        other.add(self.cache_note)
+        self.prefetch_group = other
+        self._prefetch_rows = []
+        page.add(other)
+        self._fill_models()
+        return page
+
+    def _model_path_changed(self, key: str, row) -> None:
+        setattr(self.state.settings, models.MODELS[key]["setting"], row.path())
+        self.state.save()
+        self._fill_models()
+
+    def _cache_changed(self) -> None:
+        self.state.settings.hf_cache_dir = self.cache_row.path()
+        self.state.save()
+        self.cache_note.set_text("Takes effect the next time the app starts.")
+
+    def _fill_models(self) -> None:
+        s = self.state.settings
+
+        def look():                        # folder walks: off the main thread
+            j = models.find_joycaption(s)
+            found = {k: models.status(k, s) for k in models.MODELS}
+            found["joycaption_path"] = j and (j.get("model") or j.get("path"))
+            return found
+        self._models_tok = tok = getattr(self, "_models_tok", 0) + 1
+        run_background(look, lambda f: self._fill_models_now(f) if tok == self._models_tok else None)
+
+    def _fill_models_now(self, have_all: dict) -> None:
+        s = self.state.settings
+        for key, (_row, note) in self._model_rows.items():
+            found = have_all.get("joycaption_path") if key == "joycaption" else have_all.get(key)
+            note.set_text(f"Found: {found}" if found else f"Not found in {models.location(key, s)}")
+        for r in self._dl_rows + self._prefetch_rows:
+            (self.dl_group if r in self._dl_rows else self.prefetch_group).remove(r)
+        self._dl_rows, self._prefetch_rows = [], []
+        needs = {"hydra": ["torch", "einops", "safetensors"], "wd": ["torch", "timm", "safetensors"],
+                 "joycaption": ["llama_cpp"], "joycaption_hf": ["torch", "accelerate"]}
+        for key, m in models.MODELS.items():
+            have = have_all.get(key)
+            row = Adw.ActionRow(title=GLib.markup_escape_text(m["name"]),
+                                subtitle=GLib.markup_escape_text(f"{m['size']} · {m['repo']}"))
+            missing = [n for n in needs[key] if not capabilities.has(n)]
+            if missing:
+                row.add_suffix(hint("needs " + ", ".join(missing)))
+            row.add_suffix(self._state_suffix(have, lambda k=key: self._download(k)))
+            self.dl_group.add(row)
+            self._dl_rows.append(row)
+        for key, (label, mods) in models.PREFETCH.items():
+            row = Adw.ActionRow(title=GLib.markup_escape_text(label))
+            missing = [n for n in mods if not capabilities.has(n)]
+            if missing:
+                row.set_subtitle("Install first: " + ", ".join(missing) + " (System page)")
+            btn = self._state_suffix(False, lambda k=key: self._prefetch(k))
+            btn.set_sensitive(not missing)
+            row.add_suffix(btn)
+            self.prefetch_group.add(row)
+            self._prefetch_rows.append(row)
+
+    @staticmethod
+    def _state_suffix(done, on_click) -> Gtk.Widget:
+        if done:
+            icon = Gtk.Image(icon_name="object-select-symbolic", tooltip_text="Downloaded")
+            icon.add_css_class("success")
+            return icon
+        btn = Gtk.Button(label="Download", valign=Gtk.Align.CENTER)
+        btn.add_css_class("pill")
+        btn.connect("clicked", lambda _b: on_click())
+        return btn
+
+    def _download(self, key: str) -> None:
+        s = self.state.settings
+        JobDialog(f"Download {models.MODELS[key]['name']}", str(models.download_dir(key, s)),
+                  lambda ctx: models.download(key, s, ctx), lambda _ok: self._fill_models()).present(self)
+
+    def _prefetch(self, key: str) -> None:
+        JobDialog("Download model", models.PREFETCH[key][0], lambda ctx: models.prefetch(key, ctx)).present(self)
+
+
+class JobDialog(Adw.Dialog):
+    """Runs one job (pip install, model download, …) with a live log. Closing it while busy asks first."""
+
+    def __init__(self, title: str, subtitle: str, job, on_done=None):
+        super().__init__(title=title, content_width=640, content_height=440)
+        self.job, self.on_done = job, on_done
         toolbar = Adw.ToolbarView()
         bar = Adw.HeaderBar()
-        bar.set_title_widget(Adw.WindowTitle(title=f"Install {f['pip'][0]}",
-                                             subtitle=pkgs.describe_target(state.settings)))
+        bar.set_title_widget(Adw.WindowTitle(title=title, subtitle=subtitle))
+        self.cancel_btn = Gtk.Button(label="Cancel")
+        self.cancel_btn.connect("clicked", lambda _b: self.panel.cancel())
+        bar.pack_start(self.cancel_btn)
         toolbar.add_top_bar(bar)
         self.panel = TaskPanel(min_height=280)
+        self.panel.on_busy(lambda b: (self.cancel_btn.set_visible(b), self.set_can_close(not b)))
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12, margin_end=12,
                        margin_bottom=12)
         body.append(self.panel)
         toolbar.set_content(body)
         self.set_child(toolbar)
+        self.connect("close-attempt", self._close_attempt)
         GLib.idle_add(self._start)
 
     def _start(self):
-        f = capabilities.FEATURES[self.module]
-
-        def job(ctx):
-            ok = pkgs.install(self.state.settings, f["pip"], ctx)
-            if ok and f.get("post"):
-                ok = pkgs.run_extra(f["post"], ctx)
-            return ok
+        title = self.get_title()
 
         def done(ok):
-            self.panel.log("Installed successfully." if ok else "Install failed — see the log above.")
-            self.state.settings_changed.emit()
+            self.panel.log("Done." if ok else "Did not finish — see the log above.")
             if self.on_done:
-                self.on_done()
-        self.panel.run(job, done)
+                self.on_done(ok)
+        if not self.panel.run(self.job, done, name=title):
+            self.set_can_close(True)
         return False
+
+    def _close_attempt(self, _d) -> None:
+        def answered(rid):
+            if rid == "stop":
+                self.panel.cancel()
+        alert(self, "Stop this task?", f"“{self.get_title()}” is still running.",
+              [("keep", "Keep Running"), ("stop", "Stop")], destructive="stop", default="keep", callback=answered)

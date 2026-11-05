@@ -39,6 +39,10 @@ flatpak install --user --noninteractive --or-update flathub org.gnome.Platform//
 
 tr ' ' '\n' <<<"$EXTRAS" | sed '/^$/d' > "$DIR/flatpak/extra-requirements.txt"
 
+# A running instance keeps the app id on the D-Bus session: until it is gone the icon and `flatpak run`
+# only activate it, so the freshly built app would never be the one you see.
+flatpak kill "$APP_ID" 2>/dev/null || true
+
 mkdir -p "$BUILD"
 flatpak-builder --user --install --force-clean \
     --state-dir="$BUILD/state" --repo="$BUILD/repo" \

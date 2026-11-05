@@ -37,6 +37,7 @@ class ImageSink:
     def __init__(self, save_dir: str, series_tag: str, opts: SinkOptions):
         self.save_dir, self.series_tag, self.opts = save_dir, series_tag, opts
         self.counts = defaultdict(int)
+        self.filter_error = ""
         self.guard: DuplicateGuard | None = None
         self.stems: set[str] = set()
         self._seen_file = os.path.join(save_dir, ".seen_urls.json")
@@ -94,10 +95,14 @@ class ImageSink:
                 return "duplicate"
             with Image.open(io.BytesIO(data)) as im:
                 img = im.convert("RGB")
-            if self.opts.similarity is not None and not self.opts.similarity.keep(img):
-                return "rejected"
-            if self.opts.aesthetic is not None and not self.opts.aesthetic.keep(img):
-                return "rejected_aesthetic"
+            try:
+                if self.opts.similarity is not None and not self.opts.similarity.keep(img):
+                    return "rejected"
+                if self.opts.aesthetic is not None and not self.opts.aesthetic.keep(img):
+                    return "rejected_aesthetic"
+            except Exception as exc:          # model failure (CUDA OOM, missing package): say so, don't call it "invalid"
+                self.filter_error = f"{type(exc).__name__}: {exc}"
+                return "filter_error"
             if self.opts.resize:
                 img = resize_image(img, self.opts.target_dim, self.opts.direction, self.opts.snap_to_64)
             fld = orientation(*img.size)
@@ -121,4 +126,6 @@ class ImageSink:
         return (f"{c['saved']} saved, {c['duplicate'] + c['exists']} duplicates skipped, {c['small']} too small, "
                 f"{c['invalid']} unreadable"
                 + (f", {c['rejected']} rejected by similarity" if c['rejected'] else "")
-                + (f", {c['rejected_aesthetic']} below the aesthetic threshold" if c['rejected_aesthetic'] else ""))
+                + (f", {c['rejected_aesthetic']} below the aesthetic threshold" if c['rejected_aesthetic'] else "")
+                + (f", {c['filter_error']} skipped because the filter failed ({self.filter_error})"
+                   if c['filter_error'] else ""))

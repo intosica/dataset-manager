@@ -141,14 +141,17 @@ class SimilarityFilter:
         try:
             with open(cache_file, "rb") as f:
                 cache = pickle.load(f)
-        except (OSError, pickle.PickleError, EOFError):
+        except Exception:                 # missing or corrupt: start over
             cache = {}
         vecs, dirty = [], False
         files = sorted(iter_images(folder))
         for i, p in enumerate(files):
             if self.ctx.cancelled:
                 break
-            st = os.stat(p)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
             key = hashlib.md5(f"{p}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()
             if key not in cache:
                 self.ctx.progress(i, len(files), f"Embedding examples: {os.path.basename(folder)}")
@@ -160,8 +163,10 @@ class SimilarityFilter:
                     continue
             vecs.append(cache[key])
         if dirty:
-            with open(cache_file, "wb") as f:
+            tmp = cache_file.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
                 pickle.dump(cache, f)
+            os.replace(tmp, cache_file)
         return np.stack(vecs) if vecs else np.zeros((0, 1), np.float32)
 
     def score(self, img: Image.Image) -> float:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 from ..core.settings import Settings
 from ..core.upscaler import get_upscaler
 
@@ -26,14 +28,25 @@ class AppState:
         self.settings_changed = Signal()   # preferences or options changed
         self.library_changed = Signal()    # a different library folder was chosen
         self.content_changed = Signal()    # files in the library were added / moved / removed
+        self.library_selected = Signal()   # a collection row was picked on the Library page
+        self.selected_collection = ""
+        self._runtime = None
+        self._saved = dataclasses.asdict(self.settings)
         self.apply_runtime()
 
     def apply_runtime(self) -> None:
-        get_upscaler().configure(self.settings.upscale_model, self.settings.all_model_dirs())
+        key = (self.settings.upscale_model, tuple(self.settings.all_model_dirs()))
+        if key != self._runtime:           # rescanning model folders on every unrelated save is slow on USB disks
+            self._runtime = key
+            get_upscaler().configure(*key[:1], list(key[1]))
 
     def save(self) -> None:
+        now = dataclasses.asdict(self.settings)
+        if now == self._saved:             # nothing changed: don't make every page reload
+            return
         try:
             self.settings.save()
+            self._saved = now               # only after it really reached the disk, so a failed save retries
         except OSError:
             pass
         self.apply_runtime()

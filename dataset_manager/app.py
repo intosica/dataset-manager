@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 from pathlib import Path
 
 from . import APP_ID, APP_NAME, __version__
@@ -28,7 +29,7 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
-    from .core import pkgs
+    from .core import models, pkgs
     from .ui.main_window import MainWindow
     from .ui.state import AppState
     from .ui.widgets import install_css
@@ -39,18 +40,30 @@ def main(argv=None) -> int:
     app = Adw.Application(application_id=app_id)
     state = AppState()
     note = pkgs.activate(state.settings)      # optional packages from a venv or the user's site-packages
+    models.apply_cache_env(state.settings)    # before transformers / torch import
     if note:
         print(note, file=sys.stderr)
     if args.library:
         state.set_library(args.library)
 
+    failed = False
+
     def on_activate(application) -> None:
+        nonlocal failed
         win = application.props.active_window
         if win is None:
-            Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(str(ICON_DIR))
-            Gtk.Window.set_default_icon_name(app_id)
-            install_css()
-            win = MainWindow(application, state)
+            try:
+                Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(str(ICON_DIR))
+                Gtk.Window.set_default_icon_name(app_id)
+                install_css()
+                win = MainWindow(application, state)
+            except Exception:
+                # Never stay alive without a window: this process owns the app id, so every later launch
+                # (icon, `flatpak run`) would just activate it and silently do nothing.
+                traceback.print_exc()
+                failed = True
+                application.quit()
+                return
             application.set_accels_for_action("win.preferences", ["<Control>comma"])
             application.set_accels_for_action("win.new-session", ["<Control>n"])
             application.set_accels_for_action("win.choose-library", ["<Control>o"])
@@ -60,4 +73,5 @@ def main(argv=None) -> int:
         win.present()
 
     app.connect("activate", on_activate)
-    return app.run([sys.argv[0], *gtk_args])
+    code = app.run([sys.argv[0], *gtk_args])
+    return 1 if failed else code

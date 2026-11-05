@@ -71,6 +71,8 @@ class HashCache:
     def __init__(self, db_path: str):
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("CREATE TABLE IF NOT EXISTS hashes16 (path TEXT PRIMARY KEY, size INTEGER, "
                           "mtime_ns INTEGER, w INTEGER, h INTEGER, md5 TEXT, dhash TEXT)")
         self.conn.commit()
@@ -92,11 +94,20 @@ class HashCache:
             self.conn.commit()
 
 
+_cache: HashCache | None = None
+_cache_lock = threading.Lock()
+
+
 def open_cache() -> HashCache:
-    try:
-        return HashCache(str(paths.cache_dir() / "hashes.sqlite"))
-    except Exception:
-        return HashCache(":memory:")
+    """One shared connection for the whole process (it is thread-safe through HashCache.lock)."""
+    global _cache
+    with _cache_lock:
+        if _cache is None:
+            try:
+                _cache = HashCache(str(paths.cache_dir() / "hashes.sqlite"))
+            except Exception:
+                _cache = HashCache(":memory:")
+        return _cache
 
 
 class HashIndex:
@@ -164,7 +175,11 @@ class DuplicateGuard:
 def iter_hashed(file_paths, cache, ctx: TaskContext | None = None, workers=None):
     """Yield (records, done, total) while hashing, using the cache and a thread pool."""
     ready, todo = [], []
-    for p in file_paths:
+    for n, p in enumerate(file_paths):
+        if ctx and n % 500 == 0:
+            if ctx.cancelled:
+                return
+            ctx.progress(0, 0, f"Checking files… {n:,}")
         try:
             st = os.stat(p)
         except OSError:

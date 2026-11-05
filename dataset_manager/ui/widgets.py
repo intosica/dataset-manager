@@ -84,13 +84,15 @@ def _once(fn, *args):
     GLib.idle_add(lambda: (fn(*args), False)[1])
 
 
-def run_background(fn, on_result) -> None:
-    """Short read-only job on a thread; on_result runs on the main thread."""
+def run_background(fn, on_result, on_error=None) -> None:
+    """Short read-only job on a thread; on_result (or on_error(exc)) runs on the main thread."""
     def work():
         try:
             result = fn()
-        except Exception:
+        except Exception as exc:
             traceback.print_exc()
+            if on_error:
+                _once(on_error, exc)
             return
         _once(on_result, result)
     threading.Thread(target=work, daemon=True).start()
@@ -169,6 +171,7 @@ class TaskPanel(Gtk.Box):
         self._pulse_id = 0
         self._indeterminate = False
         self._on_success = None
+        self.name = ""
 
     @property
     def busy(self) -> bool:
@@ -188,13 +191,16 @@ class TaskPanel(Gtk.Box):
     def clear(self) -> None:
         self.buffer.set_text("")
 
-    def run(self, fn, on_success=None, with_trash: bool = False) -> bool:
-        if TaskPanel.active is not None:
+    def run(self, fn, on_success=None, with_trash: bool = False, name: str = "") -> bool:
+        if TaskPanel.running() is not None:
             alert(self.get_root(), "Task in progress",
-                  "Another task is still running. Wait for it to finish or cancel it first.", [("ok", "OK")])
+                  f"“{TaskPanel.active.name}” is still running. Wait for it to finish or cancel it first.",
+                  [("ok", "OK")])
             return False
         self.clear()
         self.status.set_text("")
+        self.set_visible(True)
+        self.name = name or "A task"
         self._on_success = on_success
         ctx = TaskContext(lambda m: _once(self.log, m), lambda d, t, x: _once(self._progress, d, t, x),
                           trash=desktop_trash if with_trash else None)
@@ -204,16 +210,28 @@ class TaskPanel(Gtk.Box):
         for cb in self.busy_callbacks:
             cb(True)
 
+        self._gen = gen = getattr(self, "_gen", 0) + 1
+
         def work():
-            result, err = None, None
+            result, err, ok = None, None, False
             try:
                 result = fn(ctx)
-            except Exception:
-                err = traceback.format_exc()
-            _once(self._finished, result, err)
-        self._thread = threading.Thread(target=work, daemon=True)
+                ok = True
+            except BaseException:          # CancelledError & co. aren't Exceptions; the panel must still reset
+                err = None if ctx.cancelled else traceback.format_exc()
+            finally:
+                _once(self._finished, result, err, ok, gen)
+        self._thread = threading.Thread(target=work, daemon=True, name=self.name)
         self._thread.start()
         return True
+
+    @classmethod
+    def running(cls) -> "TaskPanel | None":
+        """The panel whose task is really still running (a dead thread never counts)."""
+        p = cls.active
+        if p is not None and (p._thread is None or not p._thread.is_alive()):
+            return None
+        return p
 
     def cancel(self) -> None:
         if self._ctx and not self._ctx.cancelled:
@@ -250,18 +268,27 @@ class TaskPanel(Gtk.Box):
             self.bar.set_fraction(min(1.0, done / total))
         self.status.set_text(text)
 
-    def _finished(self, result, err) -> None:
+    def _finished(self, result, err, ok=True, gen=None) -> None:
+        if gen is not None and gen != getattr(self, "_gen", gen):
+            return                          # stale: a newer run already owns this panel
         self._thread = self._ctx = None
-        TaskPanel.active = None
+        if TaskPanel.active is self:
+            TaskPanel.active = None
         self._set_indeterminate(False)
         self.bar.set_fraction(0)
         self.status.set_text("")
-        if err:
-            self.log("An unexpected error occurred:\n" + err)
-        elif self._on_success:
-            self._on_success(result)
-        for cb in self.busy_callbacks:
-            cb(False)
+        try:
+            if err:
+                self.log("An unexpected error occurred:\n" + err)
+            elif not ok:
+                self.log("Cancelled.")
+            elif self._on_success:
+                self._on_success(result)
+        except Exception:
+            self.log("An unexpected error occurred:\n" + traceback.format_exc())
+        finally:
+            for cb in self.busy_callbacks:
+                cb(False)
 
 
 class CaptionEditor(Adw.PreferencesGroup):

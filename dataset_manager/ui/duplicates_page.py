@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from gi.repository import Adw, GLib, Gtk
+from gi.repository import Adw, Gdk, GLib, Gtk
 
 from ..core.duplicates import HASH_BITS, apply_removals, scan_duplicates
 from ..core.imaging import make_thumbnails
@@ -88,15 +88,26 @@ class DuplicatesPage(Gtk.Box):
 
         def job(ctx):
             groups = scan_duplicates(base, thr, scope, ctx)
-            shown = groups[:300]
+            shown, rows = [], 0
+            for g in groups[:300]:                # keep the results view light: at most ~1500 rows
+                rows += len(g.duplicates) + 1
+                if shown and rows > 1500:
+                    break
+                shown.append(g)
             files = [r["path"] for g in shown for r in [g.keeper] + g.duplicates]
             if files:
                 ctx.log("Preparing previews…")
-            thumbs = dict(zip(files, make_thumbnails(files, 128))) if files else {}
+            thumbs = {}
+            for f, t in zip(files, make_thumbnails(files, 128)):
+                if t:
+                    try:
+                        thumbs[f] = Gdk.Texture.new_from_filename(t)   # decode here, not on the main thread
+                    except GLib.Error:
+                        pass
             return groups, shown, thumbs
 
         if os.path.isdir(base):
-            self.panel.run(job, self._show_groups)
+            self.panel.run(job, self._show_groups, name="Duplicate scan")
         else:
             self.panel.clear()
             self.panel.log(f"Library folder not found: {base}")
@@ -108,7 +119,7 @@ class DuplicatesPage(Gtk.Box):
                             activatable=True, tooltip_text=rec["path"])
         t = thumbs.get(rec["path"])
         if t:
-            pic = Gtk.Picture.new_for_filename(t)
+            pic = Gtk.Picture.new_for_paintable(t)
             pic.set_size_request(64, 64)
             pic.set_content_fit(Gtk.ContentFit.COVER)
             pic.add_css_class("thumb")
@@ -122,7 +133,7 @@ class DuplicatesPage(Gtk.Box):
             chk = Gtk.CheckButton(active=True, valign=Gtk.Align.CENTER)
             chk.connect("toggled", lambda _c: self._update_selection())
             row.add_suffix(chk)
-            self.checks.append((chk, keeper_path, rec["path"]))
+            self.checks.append((chk, keeper_path, rec["path"], rec.get("size", 0)))
         return row
 
     def _show_groups(self, result) -> None:
@@ -145,7 +156,7 @@ class DuplicatesPage(Gtk.Box):
     # ---- selection ----
     def _checked(self) -> list[tuple[str, list[str]]]:
         out: dict[str, list[str]] = {}
-        for chk, keeper, dup in self.checks:
+        for chk, keeper, dup, _size in self.checks:
             if chk.get_active():
                 out.setdefault(keeper, []).append(dup)
         return list(out.items())
@@ -153,13 +164,7 @@ class DuplicatesPage(Gtk.Box):
     def _update_selection(self) -> None:
         sel = self._checked()
         n = sum(len(d) for _, d in sel)
-        size = 0
-        for _, dups in sel:
-            for p in dups:
-                try:
-                    size += os.path.getsize(p)
-                except OSError:
-                    pass
+        size = sum(c[3] for c in self.checks if c[0].get_active())     # sizes from the scan: no stat() per click
         self.selection_label.set_text(f"{n} images selected · {fmt_bytes(size)}" if n else
                                       ("No images selected." if self.checks else "Nothing to review."))
         enabled = n > 0 and not self.panel.busy
@@ -180,7 +185,8 @@ class DuplicatesPage(Gtk.Box):
                 self._clear()
                 self._update_selection()
                 self.state.content_changed.emit()
-            self.panel.run(lambda ctx: apply_removals(sel, mode, ctx), done, with_trash=(mode == "trash"))
+            self.panel.run(lambda ctx: apply_removals(sel, mode, ctx), done, with_trash=(mode == "trash"),
+                           name="Removing duplicates")
 
         if mode == "delete":
             alert(self.get_root(), "Delete permanently?",

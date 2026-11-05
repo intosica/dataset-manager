@@ -28,6 +28,22 @@ class Settings:
     extra_tags: str = ""
     install_target: str = "venv"      # venv | system — where optional packages from Preferences go
     venv_dir: str = ""                # blank = <app data>/venv
+    # model locations (blank = <app data>/models/<name>); a folder or a model file
+    hydra_path: str = ""
+    wd_path: str = ""
+    joycaption_path: str = ""
+    hf_cache_dir: str = ""            # blank = app cache; where CLIP / aesthetic / similarity models go
+    tag_threshold: float = 0.0       # 0 = automatic (Hydra: calibrated per tag · WD: 0.35)
+    tag_editor_dir: str = ""          # last folder opened in the Tag Editor
+    tag_editor_follow_library: bool = False   # Tag Editor opens whatever the Library page has selected
+    upscale_preserve_originals: bool = False  # Library → Upscale keeps copies in original_images/
+    tagger: str = "hydra"             # hydra | wd
+    joy_caption_type: str = "Descriptive"
+    joy_caption_length: str = "long"
+    joy_extra: list = field(default_factory=list)
+    joy_name: str = ""
+    joy_temperature: float = 0.6
+    joy_max_tokens: int = 512
 
     # ---- derived ----
     def library_path(self) -> str:

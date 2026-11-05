@@ -43,7 +43,10 @@ class AestheticFilter:
         try:
             self._log("Loading the aesthetic model (first run downloads ~1.6 GB)…")
             from aesthetic_predictor_v2_5 import convert_v2_5_from_siglip
+            import torch
             self.model, self.processor = convert_v2_5_from_siglip(low_cpu_mem_usage=True, trust_remote_code=True)
+            if torch.cuda.is_available():
+                self.model = self.model.to("cuda", torch.bfloat16)
             self.model.eval()
             self._log("Aesthetic model ready.")
             return True
@@ -53,8 +56,11 @@ class AestheticFilter:
             return False
 
     def score(self, img) -> float:
-        px = self.processor(images=img, return_tensors="pt").pixel_values
-        out = self.model(px)
+        import torch
+        p = next(self.model.parameters())
+        px = self.processor(images=img, return_tensors="pt").pixel_values.to(p.device, p.dtype)
+        with torch.inference_mode():
+            out = self.model(px)
         logits = out.logits if hasattr(out, "logits") else out
         return float(logits.squeeze().float().cpu().numpy())
 

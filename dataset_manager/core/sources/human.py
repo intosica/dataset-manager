@@ -69,7 +69,9 @@ async def click(page, target, timeout: float = 8000) -> bool:
 async def scroll(page, dy: float) -> None:
     """Wheel down in a few uneven nudges from a random spot, with the odd short glance back up."""
     try:
-        await page.mouse.move(random.randint(300, 900), random.randint(250, 650))
+        w, h = await page.evaluate("[innerWidth, innerHeight]")
+        mx, my = random.uniform(0.25 * w, 0.75 * w), random.uniform(0.3 * h, 0.7 * h)
+        await move_to(page, mx, my)                   # keeps the pointer inside the page on small windows
         await asyncio.sleep(random.uniform(0.04, 0.12))
     except Exception:
         try:                                          # no mouse (closed window): fall back to the DOM

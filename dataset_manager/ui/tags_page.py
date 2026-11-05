@@ -1,12 +1,28 @@
 from __future__ import annotations
 
-from gi.repository import Gdk, Gtk
+from gi.repository import Adw, Gdk, Gtk
 
 from ..core.tags import process_tags
 from .widgets import hint
 
 
 class TagsPage(Gtk.Box):
+    """Tag Tools: the Tag Editor and the Imageboard Upload Helper, as two tabs."""
+
+    def __init__(self, state):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        from .tag_editor import TagEditor
+        stack = Adw.ViewStack(vexpand=True)
+        self.editor = TagEditor(state)
+        stack.add_titled_with_icon(self.editor, "editor", "Tag Editor", "document-edit-symbolic")
+        stack.add_titled_with_icon(UploadHelper(state), "upload", "Imageboard Upload Helper", "send-to-symbolic")
+        kind = getattr(Adw, "InlineViewSwitcher", None) or Adw.ViewSwitcher     # Inline needs libadwaita 1.7
+        switcher = kind(stack=stack, halign=Gtk.Align.CENTER, margin_top=8, margin_bottom=2)
+        self.append(switcher)
+        self.append(stack)
+
+
+class UploadHelper(Gtk.Box):
     """Paste a comma-separated tag list, press Process, and the same box shows the cleaned result."""
 
     def __init__(self, state):

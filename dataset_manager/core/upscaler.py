@@ -130,6 +130,52 @@ class Upscaler:
 _upscaler = Upscaler()
 
 
+def upscale_folder(folder: str, ctx, target: int, snap: bool = True, preserve: bool = False) -> dict:
+    """Enlarge every image under folder to `target` on the longer side, in place.
+    preserve: the untouched original is copied to original_images/ next to it first."""
+    import shutil
+
+    from PIL import Image, ImageOps
+
+    from .imaging import save_image
+    from .utils import iter_images
+
+    stats = {"upscaled": 0, "unchanged": 0, "failed": 0}
+    if not _upscaler.available:
+        ctx.log("No AI upscale model available: choose one in Preferences → Upscaling (needs torch + spandrel).")
+        return stats
+    files = [f for f in iter_images(folder) if "original_images" not in os.path.normpath(f).split(os.sep)]
+    for i, p in enumerate(files):
+        if ctx.cancelled:
+            ctx.log("Cancelled.")
+            break
+        ctx.progress(i, len(files), f"Upscaling {i + 1} / {len(files)}")
+        try:
+            with Image.open(p) as im:
+                img = ImageOps.exif_transpose(im).convert("RGB")
+            out = resize_image(img, target, "up", snap)
+            if out.size == img.size:
+                stats["unchanged"] += 1
+                continue
+            if preserve:
+                keep = os.path.join(os.path.dirname(p), "original_images")
+                os.makedirs(keep, exist_ok=True)
+                keep = os.path.join(keep, os.path.basename(p))
+                if not os.path.exists(keep):
+                    shutil.copy2(p, keep)
+            save_image(out, p)
+            stats["upscaled"] += 1
+        except Exception as exc:
+            stats["failed"] += 1
+            ctx.log(f"  {os.path.basename(p)}: {exc}")
+    ctx.progress(len(files), len(files), "")
+    ctx.log(f"Upscaled {stats['upscaled']:,} images"
+            + (f", {stats['unchanged']:,} already large enough" if stats["unchanged"] else "")
+            + (f", {stats['failed']:,} failed" if stats["failed"] else "")
+            + (" · originals kept in original_images/" if preserve else ""))
+    return stats
+
+
 def get_upscaler() -> Upscaler:
     return _upscaler
 

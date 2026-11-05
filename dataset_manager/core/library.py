@@ -2,11 +2,21 @@
 from __future__ import annotations
 
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
 from .tasks import TaskContext
-from .utils import LOW_QUALITY_DIRS, ORIENTATION_DIRS, collection_dirs, has_part, iter_images, pick
+from .utils import LOW_QUALITY_DIRS, ORIENTATION_DIRS, collection_dirs, has_part, iter_images
+
+SORTS = ["Random", "Name A–Z", "Newest first", "Oldest first", "Largest first"]
+
+
+def _stat(path: str, fn) -> float:
+    try:
+        return fn(path)
+    except OSError:
+        return 0
 
 
 @dataclass
@@ -44,11 +54,21 @@ def library_stats(base: str, ctx: TaskContext | None = None) -> list[CollectionS
     return rows
 
 
-def preview_files(collection_path: str, view: str = "All", limit: int = 60, shuffle: bool = True) -> list[str]:
-    """view: All | Landscape | Portrait | Square | Low quality"""
+def preview_files(collection_path: str, view: str = "All", limit: int = 60, sort: str = "Random") -> list[str]:
+    """view: All | Landscape | Portrait | Square | Low quality · sort: one of SORTS"""
     files = list(iter_images(collection_path))
     if view == "Low quality":
         files = [f for f in files if has_part(f, LOW_QUALITY_DIRS)]
     elif view in ORIENTATION_DIRS:
         files = [f for f in files if has_part(f, view) and not has_part(f, LOW_QUALITY_DIRS)]
-    return pick(files, limit, shuffle)
+    if sort == "Name A–Z":
+        key = lambda p: (os.path.basename(p).lower(), p)
+    elif sort == "Newest first":
+        key = lambda p: (-_stat(p, os.path.getmtime), p)
+    elif sort == "Oldest first":
+        key = lambda p: (_stat(p, os.path.getmtime), p)
+    elif sort == "Largest first":
+        key = lambda p: (-_stat(p, os.path.getsize), p)
+    else:
+        return random.sample(files, min(limit, len(files)))
+    return sorted(files, key=key)[:limit]

@@ -129,4 +129,4 @@ class MaintenancePage(Gtk.Box):
             caption=spec)
         base = self.state.library
         self.panel.run(lambda ctx: organize_library(base, opts, ctx), lambda _r: self.state.content_changed.emit(),
-                       with_trash=True)
+                       with_trash=True, name="Organizing the library")

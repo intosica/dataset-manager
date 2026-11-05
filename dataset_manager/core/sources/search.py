@@ -202,7 +202,7 @@ async def _yandex_variants(page, urls: list[str], want: int, ctx: TaskContext, s
                 continue
             blocked = 0
             for _ in range(random.randint(2, 4)):                     # glance down the page
-                await page.mouse.wheel(0, random.randint(300, 700))
+                await human.scroll(page, random.randint(300, 700))
                 await page.wait_for_timeout(random.randint(250, 700))
         try:
             extracted = await page.evaluate(YANDEX_JS, YANDEX_ITEM)
@@ -239,8 +239,9 @@ async def _yandex_safe_search(page, off: bool, ctx: TaskContext) -> None:
             return ctx.log("Could not reach Yandex's search settings; leaving safe search as it is.")
         if await page.evaluate("v => document.querySelector(`input[name=filter_search_results][value=${v}]`).checked", want):
             return
-        await human.click(page, page.get_by_text("No filter" if off else "Moderate search", exact=True))
-        await human.click(page, page.locator(".button-save__button"))
+        if not (await human.click(page, page.get_by_text("No filter" if off else "Moderate search", exact=True).first)
+                and await human.click(page, page.locator(".button-save__button").first)):
+            return ctx.log("Could not click Yandex's safe search setting; leaving it as it is.")
         await human.pause(0.8, 1.6)
         await page.wait_for_timeout(random.randint(1200, 2200))
         ctx.log(f"Yandex safe search: {'off' if off else 'moderate'}.")
@@ -381,7 +382,9 @@ async def run(query: str, opts: CollectOptions, settings: Settings, sink: ImageS
                         continue
                     name = f"image_{hashlib.md5(u.encode()).hexdigest()[:12]}"
                     status = await asyncio.to_thread(sink.ingest, data, name)
-                    if status in ("saved", "duplicate", "rejected"):
+                    if status == "filter_error" and sink.counts["filter_error"] == 1:
+                        ctx.log(f"Filter failed, images are being skipped: {sink.filter_error}")
+                    if status not in ("invalid", "filter_error"):   # final verdicts: don't download these again
                         sink.mark_seen(u)
                 done = sink.counts["saved"]
                 ctx.progress(done if limit else min(i, len(urls)), limit or len(urls), f"{done} images saved")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from .. import APP_NAME, __version__
+from ..core import pkgs
 from ..core.sessions import SessionStore
 from .collect_page import CollectPage
 from .duplicates_page import DuplicatesPage
@@ -30,6 +31,7 @@ class MainWindow(Adw.ApplicationWindow):
         for name, title, icon, cls in PAGES:
             self.stack.add_titled_with_icon(cls(state), name, title, icon)
         self.collect: CollectPage = self.stack.get_child_by_name("collect")
+        self.tags_page: TagsPage = self.stack.get_child_by_name("tags")
 
         # ---- sessions (left) ----
         self.store = SessionStore()
@@ -137,16 +139,36 @@ class MainWindow(Adw.ApplicationWindow):
         about.present(self)
 
     def _close_request(self, _w) -> bool:
-        if TaskPanel.active is not None:
+        task = TaskPanel.running()
+        if task is not None:
             def answered(rid: str) -> None:
                 if rid == "quit":
                     TaskPanel.cancel_active()
                     TaskPanel.wait_active()
-                    self.sessions.flush()
-                    self.destroy()
-            alert(self, "Task in progress", "A task is still running. Cancel it and quit?",
+                    self._finish_quit()
+            alert(self, "Task in progress", f"“{task.name}” is still running. Cancel it and quit?",
                   [("keep", "Keep Running"), ("quit", "Cancel and Quit")], destructive="quit", default="keep",
                   callback=answered)
             return True
+        editor = self.tags_page.editor
+        unsaved = editor.unsaved()
+        if unsaved:
+            def answered(rid: str) -> None:
+                if rid == "cancel":
+                    return
+                if rid == "save":
+                    editor.save_all()
+                self._finish_quit()
+            alert(self, f"Save {unsaved} unsaved caption{'s' if unsaved != 1 else ''}?",
+                  "The Tag Editor has caption changes that are not on disk yet.",
+                  [("cancel", "Cancel"), ("discard", "Discard and Quit"), ("save", "Save and Quit")],
+                  destructive="discard", default="save", callback=answered)
+            return True
+        pkgs.kill_all()
         self.sessions.flush()
         return False
+
+    def _finish_quit(self) -> None:
+        pkgs.kill_all()
+        self.sessions.flush()
+        self.destroy()

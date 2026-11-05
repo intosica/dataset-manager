@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import random
 import re
 from pathlib import Path
 
@@ -83,5 +82,3 @@ def prune_empty_dirs(root: str, keep_root: bool = True) -> int:
     return removed
 
 
-def pick(files: list[str], n: int, shuffle: bool) -> list[str]:
-    return random.sample(files, min(n, len(files))) if shuffle else sorted(files)[:n]

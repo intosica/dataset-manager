@@ -41,6 +41,8 @@ modules:
       - mkdir -p /app/lib/dataset-manager
       - cp -r dataset_manager /app/lib/dataset-manager/
       - find /app/lib/dataset-manager -name __pycache__ -prune -exec rm -rf {} +
+      # /app is read-only at run time: without bytecode compiled here, Python recompiles every module on each launch
+      - python3 -m compileall -q -j 0 /app/lib/dataset-manager
       - install -Dm755 dataset-manager.sh /app/bin/dataset-manager
       - install -Dm644 dataset_manager/resources/dataset-manager.svg /app/share/icons/hicolor/scalable/apps/io.github.intosica.DatasetManager.svg
       - install -Dm644 io.github.intosica.DatasetManager.desktop -t /app/share/applications

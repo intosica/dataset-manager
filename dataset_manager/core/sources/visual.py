@@ -44,6 +44,8 @@ async def _payload(page, seed: str) -> dict:
 
 async def _humanize(page) -> None:
     """Big viewport + user agent without 'HeadlessChrome' (Bing rejects uploads from headless UAs)."""
+    if not await page.evaluate("/Headless/.test(navigator.userAgent)"):
+        return                                        # headed: keep the real window size (no_viewport) and UA
     try:
         await page.set_viewport_size({"width": 1400, "height": 900})
         cdp = await page.context.new_cdp_session(page)

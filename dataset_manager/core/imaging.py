@@ -1,8 +1,10 @@
 """Image file helpers: saving and thumbnails."""
 from __future__ import annotations
 
+import functools
 import hashlib
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
@@ -18,14 +20,19 @@ def save_image(img: Image.Image, dest: str) -> None:
     img.save(dest, **_SAVE_KW.get(os.path.splitext(dest)[1].lower(), {}))
 
 
+@functools.cache
+def _thumb_dir():
+    folder = paths.cache_dir() / "thumbnails"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def make_thumbnail(path: str, side: int = 256) -> str | None:
     """Cached JPEG thumbnail; returns its path, or None if the image can't be read."""
     try:
         st = os.stat(path)
         key = hashlib.md5(f"{path}|{st.st_mtime_ns}|{side}".encode()).hexdigest()
-        folder = paths.cache_dir() / "thumbnails"
-        folder.mkdir(parents=True, exist_ok=True)
-        out = folder / f"{key}.jpg"
+        out = _thumb_dir() / f"{key}.jpg"
         if not out.exists():
             with Image.open(path) as im:
                 try:
@@ -34,7 +41,9 @@ def make_thumbnail(path: str, side: int = 256) -> str | None:
                     pass
                 rgb = im.convert("RGB")
             rgb.thumbnail((side, side))
-            rgb.save(out, "JPEG", quality=85)
+            tmp = out.with_name(f"{key}.{threading.get_ident()}.tmp")
+            rgb.save(tmp, "JPEG", quality=85)
+            os.replace(tmp, out)           # atomic: a crash or a racing worker never leaves a broken thumbnail
         return str(out)
     except Exception:
         return None

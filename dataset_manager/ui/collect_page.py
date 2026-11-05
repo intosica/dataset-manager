@@ -330,20 +330,25 @@ class CollectPage(Gtk.Box):
                if simp["enabled"] else SimilaritySpec())
         aes = p["aesthetic"]
         aesthetic = AestheticSpec(True, aes["threshold"]) if aes["enabled"] else AestheticSpec()
-        seeds = [] if key not in SIMILAR_ENGINES else _expand_seeds(p["seed"], p["seed_count"])
-        if p["seed"].strip() and key in SIMILAR_ENGINES and not seeds:
-            self.panel.clear()
-            self.panel.log("The seed is not an image file, a folder with images, or an http(s) image URL.")
-            return
         opts = CollectOptions(
-            source=key, query="" if seeds else p["query"], collection_name=p["name"], limit=p["limit"], randomize=p["randomize"],
+            source=key, query=p["query"], collection_name=p["name"], limit=p["limit"], randomize=p["randomize"],
             parallel=p["parallel"], safe_search_off=p["safe_search_off"] and key not in NO_SAFE_SEARCH,
-            filters={} if artist else self.filters.selection(), similarity=sim, seeds=seeds, aesthetic=aesthetic,
+            filters={} if artist else self.filters.selection(), similarity=sim, seeds=[], aesthetic=aesthetic,
             sink=SinkOptions(min_side=p["min_side"], resize=p["resize"], target_dim=s.target_dim,
                              direction=s.scale_direction, snap_to_64=s.snap_to_64, skip_duplicates=p["skip_duplicates"],
                              duplicate_threshold=s.duplicate_threshold, write_captions=p["captions"],
                              caption=s.caption_spec(), sort_by_orientation=p["sort_by_orientation"]))
-        self.panel.run(lambda ctx: run_collection(opts, s, ctx), lambda _r: self.state.content_changed.emit())
+        seed = p["seed"] if key in SIMILAR_ENGINES else ""
+
+        def job(ctx):
+            if seed.strip():                      # a seed folder is walked here, not on the main thread
+                opts.seeds = _expand_seeds(seed, p["seed_count"])
+                if not opts.seeds:
+                    ctx.log("The seed is not an image file, a folder with images, or an http(s) image URL.")
+                    return None
+                opts.query = ""
+            return run_collection(opts, s, ctx)
+        self.panel.run(job, lambda _r: self.state.content_changed.emit(), name="Image collection")
 
 
 def _expand_seeds(text: str, count: int) -> list[str]:

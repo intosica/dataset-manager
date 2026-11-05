@@ -37,7 +37,7 @@ def find_browser(configured: str = "", prefer_system: bool = False) -> str | Non
     env = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if env and env != "0":
         cache_dirs.append(env)
-    cache_dirs += [str(paths.APP_DIR / "pw-browsers"), str(Path.home() / ".cache" / "ms-playwright"),
+    cache_dirs += [str(paths.data_dir() / "ms-playwright"), str(paths.APP_DIR / "pw-browsers"), str(Path.home() / ".cache" / "ms-playwright"),
                    str(Path.home() / "Library" / "Caches" / "ms-playwright")]
     for d in cache_dirs:
         for pat in _PLAYWRIGHT_SEARCH:
@@ -65,8 +65,10 @@ async def apply_stealth(page) -> bool:
             from playwright_stealth import stealth_async
             await stealth_async(page)
             return True
-        except ImportError:
+        except Exception:
             return False
+    except Exception:                       # a stealth bug must not stop the run
+        return False
 
 
 @asynccontextmanager
@@ -100,4 +102,7 @@ async def open_browser(settings: Settings, ctx: TaskContext, prefer_system: bool
                 ctx.log("Tip: `pip install playwright-stealth` reduces bot detection.")
             yield browser, page
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass                          # window already closed by the user

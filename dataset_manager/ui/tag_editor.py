@@ -172,8 +172,8 @@ class TagEditor(Gtk.Box):
         self.cap_buf.connect("changed", lambda _b: self._cap_edited())
         frame = Gtk.ScrolledWindow(child=self.cap_view, css_classes=["card"], min_content_height=120)
         # drag the grip under the box to make it taller or shorter
-        grip = Gtk.Image(icon_name="list-drag-handle-symbolic", css_classes=["dim-label"],
-                         tooltip_text="Drag to resize the caption box")
+        grip = Gtk.Image(icon_name="dm-resize-vertical-symbolic", pixel_size=18, halign=Gtk.Align.CENTER,
+                         tooltip_text="Drag up or down to resize the caption box")   # own icon: always bundled
         grip.set_cursor(Gdk.Cursor.new_from_name("ns-resize"))
         drag = Gtk.GestureDrag()
         drag.connect("drag-begin", lambda *_a: setattr(self, "_grip_h", frame.get_min_content_height()))

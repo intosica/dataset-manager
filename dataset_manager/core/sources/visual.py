@@ -9,9 +9,10 @@ Verified engines (Playwright Chromium, no system Chrome needed):
            loading more tiles as you scroll (hundreds of candidates).
   Bing   - works headless and headed. Headless Chromium is refused ("Unable to process this search") unless the
            'Headless' token is stripped from the user agent, which _humanize() does through CDP.
-  Yandex - 'Similar images' shows ~40 tiles, all visible at once (its 'Show more' button leaves the grid); scrolling
-           loads nothing more. Works headless and headed in tests; it may show a robot check on heavy use (then we return what we have;
-           a real system Chrome via open_browser(prefer_system=True) and a headed window make that rarer).
+  Yandex - 'Similar images' shows ~40 tiles; the orange 'Show more' button below the grid (usually hidden under the
+           cookie banner, which we dismiss) loads another pageful, up to a dozen rounds. Works headless and headed in
+           tests, but 'Show more' can trigger a robot check: then we keep what we have, log it and stop (a system
+           Chrome via open_browser(prefer_system=True) and fewer seeds make it rarer).
 Google Lens is not offered: it is consent/bot blocked.
 Every failure is logged and yields [] (or the partial list) instead of raising.
 """
@@ -95,6 +96,19 @@ async def _scroll_collect(page, extract, cap, ctx, more=()) -> list[str]:
     return best
 
 
+async def _dismiss_cookies(page) -> None:
+    """Cookie banners sit on top of the results, including the 'Show more' button."""
+    for label in ("Allow all", "Allow essential cookies"):
+        try:
+            btn = page.locator(f"button:has-text('{label}')").first
+            if await btn.count() and await btn.is_visible():
+                await btn.click(timeout=3000)
+                await page.wait_for_timeout(500)
+                return
+        except Exception:
+            pass
+
+
 async def _bing(page, payload, cap, ctx):
     await page.goto("https://www.bing.com/images", wait_until="domcontentloaded")
     await page.click("#sb_sbi", timeout=15000)
@@ -108,6 +122,7 @@ async def _bing(page, payload, cap, ctx):
     await page.goto(f"https://www.bing.com/images/search?bcid={_q(page.url, 'bcid')}&vsa=2",
                     wait_until="domcontentloaded")
     await page.wait_for_timeout(3000)
+    await _dismiss_cookies(page)
 
     async def extract():
         hrefs = await page.evaluate("() => [...document.querySelectorAll('a[href*=\"mediaurl=\"]')].map(a => a.href)")
@@ -115,22 +130,87 @@ async def _bing(page, payload, cap, ctx):
     return await _scroll_collect(page, extract, cap, ctx, more=("a.btn_seemore",))
 
 
+async def _yandex_open_similar(page, payload, ctx) -> bool:
+    """Upload the seed and land on the 'Similar images' grid. Yandex refuses uploads now and then, so retry."""
+    for attempt in range(3):
+        if ctx.cancelled:
+            return False
+        try:
+            await page.goto("https://yandex.com/images/", wait_until="domcontentloaded")
+            await page.wait_for_timeout(random.randint(500, 1200))
+            await page.click(".HeaderDesktopActions-CbirButton", timeout=15000)
+            await page.set_input_files("input.CbirCore-FileInput", payload)
+            await page.wait_for_url(re.compile(r"cbir_id="), timeout=30000)
+        except Exception:
+            if "captcha" in page.url.lower():
+                ctx.log("Yandex asks for a robot check before the results; skipping this seed "
+                        "(a headed browser or fewer seeds make that rarer).")
+                return False
+            if attempt == 2:
+                return False
+            continue
+        await page.goto(re.sub(r"cbir_page=[^&]*", "cbir_page=similar", page.url), wait_until="domcontentloaded")
+        if await _wait_tiles(page, 20):
+            return True
+    return False
+
+
 async def _yandex(page, payload, cap, ctx):
-    await page.goto("https://yandex.com/images/", wait_until="domcontentloaded")
-    await page.click(".HeaderDesktopActions-CbirButton", timeout=15000)
-    await page.set_input_files("input.CbirCore-FileInput", payload)
-    try:
-        await page.wait_for_url(re.compile(r"cbir_id="), timeout=30000)
-    except Exception:
-        ctx.log("Yandex did not accept the image" + (" (robot check?)" if "captcha" in page.url else "") + ".")
+    if not await _yandex_open_similar(page, payload, ctx):
+        ctx.log("Yandex showed no similar images" + (" (robot check)." if "captcha" in page.url.lower() else "."))
         return []
-    await page.goto(re.sub(r"cbir_page=[^&]*", "cbir_page=similar", page.url), wait_until="domcontentloaded")
-    if not await _wait_tiles(page, 20):
-        ctx.log("Yandex showed no similar images" + (" (robot check)" if "captcha" in page.url else "") + ".")
-        return []
-    async def extract():
-        return [o or p for o, p in await page.evaluate(YANDEX_JS, YANDEX_ITEM)]
-    return await _scroll_collect(page, extract, cap, ctx)
+    await _dismiss_cookies(page)
+    urls: list[str] = []
+    for _round in range(12):
+        if ctx.cancelled or page.is_closed():
+            break
+        try:
+            items = await page.evaluate(YANDEX_JS, YANDEX_ITEM)
+        except Exception:
+            items = []                       # page is reloading
+        urls = list(dict.fromkeys(urls + [u for u in (o or p for o, p in items) if u]))
+        if cap and len(urls) >= cap:
+            break
+        try:                                              # the button only renders near the end of the list
+            for _ in range(random.randint(4, 7)):         # …and scroll there like a person would
+                await page.evaluate("(d) => window.scrollBy(0, d)", random.randint(300, 700))
+                await page.wait_for_timeout(random.randint(200, 500))
+            await page.wait_for_timeout(random.randint(1200, 2500))
+        except Exception:
+            break
+        more = page.locator(".FetchListButton").first     # the orange 'Show more' under the grid
+        try:
+            if not await more.count():
+                break
+            await more.scroll_into_view_if_needed(timeout=3000)
+            before_url, before_n = page.url, len(urls)
+            await more.click(timeout=8000)
+        except Exception:
+            break
+        grew = False
+        for _ in range(12):
+            await page.wait_for_timeout(1000)
+            if "captcha" in page.url.lower():
+                break
+            if page.url != before_url:                        # next pageful loaded by navigation
+                await _wait_tiles(page, 20)
+                grew = True
+                break
+            try:                                             # …or appended in place
+                if len(await page.evaluate(YANDEX_JS, YANDEX_ITEM)) > before_n:
+                    grew = True
+                    break
+            except Exception:
+                pass
+        if "captcha" in page.url.lower():
+            ctx.log(f"Yandex asked for a robot check on 'Show more'; keeping the {len(urls)} images found so far. "
+                    "Fewer seed images (or a headed browser) make the check rarer.")
+            break
+        if not grew:
+            break
+    if not urls:
+        ctx.log(f"Yandex returned no similar images (page: {page.url[:80]}).")
+    return urls
 
 
 async def similar_urls(page, engine: str, seed: str, cap: int, ctx) -> list[str]:

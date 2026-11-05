@@ -6,12 +6,12 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from ..core import capabilities
 from ..core.collector import CollectOptions, run_collection
-from ..core.similarity import BACKENDS, SimilaritySpec
+from ..core.similarity import BACKENDS, SHORT, SimilaritySpec
 from ..core.sink import SinkOptions
 from ..core.sources import SOURCES
 from ..core.sources.filters import NO_SAFE_SEARCH
 from .filter_panel import FilterPanel
-from .widgets import ModelPicker, PathRow, TaskPanel, icon_button
+from .widgets import ModelPicker, NoteRow, PathRow, TaskPanel, icon_button
 
 try:
     from ..core.sources.visual import SIMILAR_ENGINES
@@ -112,7 +112,7 @@ class CollectPage(Gtk.Box):
         self._resize_toggled()
 
         # ---- similarity filter (every field is always editable; the model row switches it on) ----
-        self.backend = Adw.ComboRow(title="Model", model=Gtk.StringList.new([OFF] + [v[0] for v in BACKENDS.values()]))
+        self.backend = Adw.ComboRow(title="Model", model=Gtk.StringList.new([OFF] + [SHORT.get(k, BACKENDS[k][0]) for k in BACKENDS]))
         self.backend_keys = list(BACKENDS)
         self.pos_dir = PathRow("Look like (folder of example images)")
         self.neg_dir = PathRow("Don't look like (optional folder)")
@@ -122,7 +122,8 @@ class CollectPage(Gtk.Box):
                      "Images at or below the threshold are skipped.")
         g_sim = Adw.PreferencesGroup(title="Keep only images that look like my examples",
                                      description="Pick a model to switch the filter on. Models download on first use.")
-        for w in (self.backend, self.pos_dir, self.neg_dir, self.threshold):
+        self.backend_note = NoteRow()
+        for w in (self.backend, self.backend_note, self.pos_dir, self.neg_dir, self.threshold):
             g_sim.add(w)
         self.backend.connect("notify::selected", self._backend_changed)
 
@@ -272,14 +273,14 @@ class CollectPage(Gtk.Box):
     def _backend_changed(self, *_a) -> None:
         sel = self.backend.get_selected()
         if sel == 0:
-            self.backend.set_subtitle("The filter is off; every image that passes the other checks is kept.")
+            self.backend_note.set_text("The filter is off; every image that passes the other checks is kept.")
             return
-        _label, mods, cmd = BACKENDS[self.backend_keys[sel - 1]]
+        label, mods, cmd = BACKENDS[self.backend_keys[sel - 1]]
         missing = [m for m in mods if not capabilities.has(m)]
         if missing and os.environ.get("FLATPAK_ID"):
             cmd = f"./build-flatpak.sh --extras \"imageprism onnxruntime transformers {cmd.removeprefix('pip install ')}\""
-        self.backend.set_subtitle(GLib.markup_escape_text(f"Not installed. Run: {cmd}") if missing else
-                                  "Installed. The model is downloaded on first use and cached.")
+        self.backend_note.set_text(f"{label}. " + (f"Not installed. Run: {cmd}" if missing else
+                                  "Installed. The model is downloaded on first use and cached."))
 
     def _busy(self, busy: bool) -> None:
         self.start_btn.set_sensitive(not busy)

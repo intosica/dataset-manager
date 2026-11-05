@@ -28,6 +28,16 @@ BACKENDS = {
     "openclip": ("OpenCLIP ViT-B/32 — best quality", ["torch", "open_clip"], "pip install torch open_clip_torch"),
     "mobilenet": ("MobileNetV3 — pure visual style, tiny", ["torch", "torchvision"], "pip install torch torchvision"),
 }
+# Combo-row sized names: the full labels above are too long for a row and get ellipsized.
+SHORT = {
+    "imgbeddings": "imgbeddings (88 MB)",
+    "tinyclip": "TinyCLIP ViT-8M",
+    "imageprism:semantic": "imageprism · semantic",
+    "imageprism:style": "imageprism · style",
+    "imageprism:instance": "imageprism · object",
+    "openclip": "OpenCLIP ViT-B/32",
+    "mobilenet": "MobileNetV3",
+}
 TINYCLIP_ID = "wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M"
 
 

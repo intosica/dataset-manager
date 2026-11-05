@@ -44,6 +44,23 @@ def hint(text: str = "") -> Gtk.Label:
     return label
 
 
+class NoteRow(Adw.PreferencesRow):
+    """A wrapping paragraph row — a long text in a row subtitle is ellipsized into unreadability."""
+
+    def __init__(self, text: str = ""):
+        super().__init__()
+        self.label = hint(text)
+        self.label.set_selectable(True)
+        for side in ("top", "bottom"):
+            getattr(self.label, f"set_margin_{side}")(6)
+        self.label.set_margin_start(12)
+        self.label.set_margin_end(12)
+        self.set_child(self.label)
+
+    def set_text(self, text: str) -> None:
+        self.label.set_label(text)
+
+
 def icon_button(icon: str, tooltip: str, callback=None, flat: bool = True) -> Gtk.Button:
     b = Gtk.Button(icon_name=icon, tooltip_text=tooltip, valign=Gtk.Align.CENTER)
     if flat:

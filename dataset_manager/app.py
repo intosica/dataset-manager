@@ -28,6 +28,7 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
+    from .core import pkgs
     from .ui.main_window import MainWindow
     from .ui.state import AppState
     from .ui.widgets import install_css
@@ -37,6 +38,9 @@ def main(argv=None) -> int:
     GLib.set_prgname(app_id)
     app = Adw.Application(application_id=app_id)
     state = AppState()
+    note = pkgs.activate(state.settings)      # optional packages from a venv or the user's site-packages
+    if note:
+        print(note, file=sys.stderr)
     if args.library:
         state.set_library(args.library)
 

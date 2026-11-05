@@ -3,19 +3,24 @@ from __future__ import annotations
 
 import importlib.util
 
-# module -> (what it enables, install command)
+# module -> what it enables, the pip packages that provide it, optional post-install command
 FEATURES = {
-    "playwright": ("Image search collection (browser automation)", "pip install playwright && playwright install chromium"),
-    "playwright_stealth": ("Anti-bot hardening for searches (optional)", "pip install playwright-stealth"),
-    "requests": ("ArtofMTG source", "pip install requests"),
-    "bs4": ("ArtofMTG source", "pip install beautifulsoup4"),
-    "torch": ("AI upscaling, GPU support", "pip install torch"),
-    "spandrel": ("AI upscaling models", "pip install spandrel"),
-    "transformers": ("Low-quality (aesthetic) detection, TinyCLIP similarity", "pip install transformers"),
-    "onnxruntime": ("Similarity filter: imgbeddings backend (with transformers)", "pip install onnxruntime transformers"),
-    "imageprism": ("Similarity filter: imageprism backends", "pip install imageprism"),
-    "open_clip": ("Similarity filter: OpenCLIP backend", "pip install open_clip_torch"),
-    "torchvision": ("Similarity filter: MobileNet backend", "pip install torchvision"),
+    "playwright": {"what": "Image search collection (browser automation)",
+                   "pip": ["playwright"], "post": "playwright install chromium"},
+    "playwright_stealth": {"what": "Anti-bot hardening for searches (optional)",
+                           "pip": ["playwright-stealth"]},
+    "requests": {"what": "ArtofMTG source (HTTP)", "pip": ["requests"]},
+    "bs4": {"what": "ArtofMTG source (HTML parsing)", "pip": ["beautifulsoup4"]},
+    "torch": {"what": "AI upscaling, GPU support", "pip": ["torch"]},
+    "spandrel": {"what": "AI upscaling models", "pip": ["spandrel"]},
+    "transformers": {"what": "Low-quality detection, TinyCLIP similarity", "pip": ["transformers"]},
+    "onnxruntime": {"what": "Similarity filter: imgbeddings backend",
+                    "pip": ["onnxruntime", "transformers"]},
+    "imageprism": {"what": "Similarity filter: imageprism backends", "pip": ["imageprism"]},
+    "open_clip": {"what": "Similarity filter: OpenCLIP backend", "pip": ["open_clip_torch"]},
+    "torchvision": {"what": "Similarity filter: MobileNet backend", "pip": ["torchvision"]},
+    "aesthetic_predictor_v2_5": {"what": "Aesthetic score filter (1–10) while collecting",
+                                 "pip": ["aesthetic-predictor-v2-5"]},
 }
 
 
@@ -26,5 +31,10 @@ def has(module: str) -> bool:
         return False
 
 
-def report() -> list[tuple[str, bool, str, str]]:
-    return [(mod, has(mod), what, cmd) for mod, (what, cmd) in FEATURES.items()]
+def report() -> list[dict]:
+    return [{"module": mod, "ok": has(mod), **info} for mod, info in FEATURES.items()]
+
+
+def pip_hint(modules) -> str:
+    pkgs = [p for m in modules for p in FEATURES[m]["pip"]]
+    return "pip install " + " ".join(dict.fromkeys(pkgs))

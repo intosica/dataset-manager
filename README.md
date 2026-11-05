@@ -54,7 +54,8 @@ The window adapts to narrow sizes: the sidebar collapses and the page switcher m
 
 ### Sessions
 
-A session is a saved set of Collect settings (source, query, filters, options, seed images, similarity filter).
+A session is a saved set of Collect settings (source, query, filters, options, seed images, similarity filter,
+aesthetic score).
 
 * There is always one active session. Whatever you change on the Collect page is saved into it straight away, and a
   session named after nothing follows the search terms until you rename it.
@@ -88,9 +89,25 @@ A session is a saved set of Collect settings (source, query, filters, options, s
   | MobileNetV3 | ~20 MB | `pip install torch torchvision` |
 
   Models download on first use; example embeddings are cached.
+* **Aesthetic score** — switch it on per session to score every download 1–10 with
+  [aesthetic-predictor-v2-5](https://github.com/discus0434/aesthetic-predictor-v2-5) and keep only images at or above
+  the minimum (5.5 is a decent photo, 6.5+ is striking). Needs `pip install aesthetic-predictor-v2-5` (~1.6 GB of
+  torch weights, downloaded on the first run). Skipped downloads do not count towards the image limit.
+* **Human-like browsing** — clicks and scrolling are not mechanical: the pointer glides along a slightly curved path to
+  a random spot inside a button, the wheel scrolls in uneven bursts from a random position (with the odd glance back
+  up), and the safe-search settings are clicked the same way. That keeps robot checks rarer, especially on Yandex.
 
-Preferences (Ctrl+,) holds the library folder, browser, upscale model, model folders, resize defaults and the caption
-template; changes apply immediately.
+## Optional packages
+
+Nothing beyond PyGObject is required to launch the app, but collection needs Playwright and some filters need extra
+packages. **Preferences → System** lists every optional component: hits **Install** to run pip for you, either into a
+**virtual environment** (default: `<app data>/venv`, the flatpak runtime stays untouched) or into your **user's system
+site-packages** — your choice, changeable at any time, and the folder of the virtual environment can be moved
+somewhere else. On start-up the app looks in whichever one you chose (and in the system) for each module, so installed
+packages are picked up without a restart. Post-install steps such as `playwright install chromium` run automatically.
+
+Preferences (Ctrl+,) also holds the library folder, browser, upscale model, model folders, resize defaults and the
+caption template; changes apply immediately.
 
 ## Where things are stored
 

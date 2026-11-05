@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from ..core import capabilities, paths
+from ..core import capabilities, paths, pkgs
 from ..core.browser import find_browser
-from .widgets import CaptionEditor, ModelPicker, PathRow, hint, icon_button
+from .widgets import CaptionEditor, ModelPicker, NoteRow, PathRow, TaskPanel, hint, icon_button
 
 DIRECTIONS = [("Enlarge and shrink", "both"), ("Enlarge only", "up"), ("Shrink only", "down")]
 
@@ -73,7 +73,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         # ---- System ----
         sysp = Adw.PreferencesPage(title="System", icon_name="computer-symbolic")
-        sysp.add(self._system_group())
+        for g in self._system_groups():
+            sysp.add(g)
         sysp.add(self._locations)
 
         for p in (general, up, cap, sysp):
@@ -136,28 +137,119 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._fill_dirs()
 
     # ---- system ----
-    def _system_group(self) -> Adw.PreferencesGroup:
-        g = Adw.PreferencesGroup(title="Optional components",
-                                 description="Missing ones show the pip command to install them in the app's environment.")
-        for mod, ok, what, cmd in capabilities.report():
-            row = Adw.ActionRow(title=GLib.markup_escape_text(what),
-                                subtitle=GLib.markup_escape_text(f"{mod}" + ("" if ok else f" · {cmd}")),
-                                subtitle_selectable=True)
-            icon = Gtk.Image(icon_name="object-select-symbolic" if ok else "dialog-warning-symbolic")
-            if ok:
-                icon.add_css_class("success")
-            else:
-                icon.add_css_class("warning")
-            row.add_suffix(icon)
-            g.add(row)
+    def _system_groups(self) -> list[Adw.PreferencesGroup]:
+        s = self.state.settings
+
+        # where packages go
+        self.install_target = Adw.ComboRow(
+            title="Install optional packages into",
+            model=Gtk.StringList.new(["Virtual environment", "System site-packages"]))
+        self.install_target.set_selected(1 if s.install_target == "system" else 0)
+        self.venv_row = PathRow("Virtual environment folder")
+        self.venv_row.set_text(s.venv_dir)
+        self.venv_row.add_suffix(icon_button("edit-undo-symbolic", "Use the default folder", self._reset_venv))
+        self.env_note = NoteRow()
+        self.venv_row.connect("changed", lambda *_a: self._env_changed())
+        self.install_target.connect("notify::selected", lambda *_a: self._env_changed())
+        g_env = Adw.PreferencesGroup(
+            title="Install location",
+            description="Both targets work. A virtual environment is created next to the app's data and leaves the "
+                        "flatpak runtime untouched; system installs go into your user's site-packages. Either way the "
+                        "app finds the packages on start-up without a restart.")
+        for w in (self.install_target, self.venv_row, self.env_note):
+            g_env.add(w)
+        self._env_changed()
+
+        # one row per optional component
+        self.feat_group = Adw.PreferencesGroup(
+            title="Optional components",
+            description="Install what you want from here; nothing is required to start the app.")
+        self._feature_rows = []
+        self._fill_features()
+
         loc = Adw.PreferencesGroup(title="Locations")
-        for title, val in (("Application folder", paths.APP_DIR), ("Settings", self.state.settings.file()),
+        for title, val in (("Application folder", paths.APP_DIR), ("Settings", s.file()),
                            ("Cache", paths.cache_dir()),
-                           ("Browser", find_browser(self.state.settings.browser_path) or "Playwright bundled Chromium"),
+                           ("Browser", find_browser(s.browser_path) or "Playwright bundled Chromium"),
                            ("Portable mode", "yes" if paths.portable() else "no")):
             r = Adw.ActionRow(title=title, subtitle=GLib.markup_escape_text(str(val)), subtitle_selectable=True)
             r.add_css_class("property")
             loc.add(r)
-        # one page can hold only the groups given to it; return a wrapper box group for components, locations appended
         self._locations = loc
-        return g
+        return [g_env, self.feat_group]
+
+    def _env_changed(self) -> None:
+        s = self.state.settings
+        s.install_target = "system" if self.install_target.get_selected() else "venv"
+        s.venv_dir = self.venv_row.get_text().strip()
+        self.venv_row.set_sensitive(s.install_target == "venv")
+        pkgs.activate(s)
+        self.env_note.set_text("In use: " + pkgs.describe(s))
+        self.state.save()
+
+    def _reset_venv(self) -> None:
+        self.venv_row.set_text("")
+
+    def _fill_features(self) -> None:
+        for r in self._feature_rows:
+            self.feat_group.remove(r)
+        self._feature_rows = []
+        for f in capabilities.report():
+            cmd = "pip install " + " ".join(f["pip"]) + (f" · then `{f['post']}`" if f.get("post") else "")
+            row = Adw.ActionRow(title=GLib.markup_escape_text(f["what"]),
+                                subtitle=GLib.markup_escape_text(cmd), subtitle_selectable=True)
+            if f["ok"]:
+                row.add_suffix(hint("installed"))
+                icon = Gtk.Image(icon_name="object-select-symbolic")
+                icon.add_css_class("success")
+                row.add_suffix(icon)
+            else:
+                btn = Gtk.Button(label="Install")
+                btn.add_css_class("pill")
+                btn.set_valign(Gtk.Align.CENTER)
+                btn.connect("clicked", lambda _b, mod=f["module"]: self._install(mod))
+                row.add_suffix(btn)
+            self.feat_group.add(row)
+            self._feature_rows.append(row)
+
+    def _install(self, module: str) -> None:
+        dlg = InstallDialog(self.state, module, self._fill_features)
+        dlg.present(self.get_root() if isinstance(self.get_root(), Gtk.Widget) else None)
+
+
+class InstallDialog(Adw.Dialog):
+    """Runs pip (and any post-install step) for one optional component, with a live log."""
+
+    def __init__(self, state, module: str, on_done=None):
+        f = capabilities.FEATURES[module]
+        super().__init__(title=f"Install {f['pip'][0]}", content_width=620, content_height=440)
+        self.state, self.module, self.on_done = state, module, on_done
+        toolbar = Adw.ToolbarView()
+        bar = Adw.HeaderBar()
+        bar.set_title_widget(Adw.WindowTitle(title=f"Install {f['pip'][0]}",
+                                             subtitle=pkgs.describe_target(state.settings)))
+        toolbar.add_top_bar(bar)
+        self.panel = TaskPanel(min_height=280)
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12, margin_end=12,
+                       margin_bottom=12)
+        body.append(self.panel)
+        toolbar.set_content(body)
+        self.set_child(toolbar)
+        GLib.idle_add(self._start)
+
+    def _start(self):
+        f = capabilities.FEATURES[self.module]
+
+        def job(ctx):
+            ok = pkgs.install(self.state.settings, f["pip"], ctx)
+            if ok and f.get("post"):
+                ok = pkgs.run_extra(f["post"], ctx)
+            return ok
+
+        def done(ok):
+            self.panel.log("Installed successfully." if ok else "Install failed — see the log above.")
+            self.state.settings_changed.emit()
+            if self.on_done:
+                self.on_done()
+        self.panel.run(job, done)
+        return False

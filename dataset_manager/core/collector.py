@@ -6,8 +6,9 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from . import capabilities, paths
+from . import capabilities, paths, pkgs
 from .settings import Settings
+from .aesthetic_score import AestheticFilter, AestheticSpec
 from .similarity import SimilaritySpec, SimilarityFilter
 from .sink import ImageSink, SinkOptions
 from .tasks import TaskContext
@@ -26,6 +27,7 @@ class CollectOptions:
     seeds: list = field(default_factory=list)            # image paths / URLs for 'visually similar' search
     filters: dict = field(default_factory=dict)          # group key -> [option values], see sources/filters.py
     similarity: SimilaritySpec = field(default_factory=SimilaritySpec)
+    aesthetic: AestheticSpec = field(default_factory=AestheticSpec)
     sink: SinkOptions = field(default_factory=SinkOptions)
 
 
@@ -45,6 +47,7 @@ def derive_names(query: str, collection_name: str, fallback: str = "Gallery") ->
 def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -> dict:
     from .sources import mtg, search
 
+    pkgs.activate(settings)                  # packages installed into a venv/system site while the app was running
     query = opts.query.strip()
     if not query and not opts.seeds:
         ctx.log("Enter search terms or a URL, or a seed image for visual search.")
@@ -54,10 +57,8 @@ def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -
     needs = {"ArtofMTG": ["requests", "bs4"]}.get(opts.source, ["playwright"])
     missing = [m for m in needs if not capabilities.has(m)]
     if missing:
-        hint = {m: capabilities.FEATURES[m][1] for m in missing}
         ctx.log("Missing packages: " + ", ".join(missing))
-        for cmd in dict.fromkeys(hint.values()):
-            ctx.log(f"  {cmd}")
+        ctx.log("  " + capabilities.pip_hint(missing) + "   (or Preferences → System → Install)")
         return {}
 
     if query:
@@ -79,6 +80,13 @@ def run_collection(opts: CollectOptions, settings: Settings, ctx: TaskContext) -
             return {}
         if ctx.cancelled:
             return {}
+    if opts.aesthetic.enabled:
+        if not AestheticFilter.available():
+            ctx.log("The aesthetic filter needs aesthetic-predictor-v2-5.")
+            ctx.log("  " + capabilities.pip_hint(["aesthetic_predictor_v2_5"])
+                     + "   (or Preferences → System → Install)")
+            return {}
+        opts.sink.aesthetic = AestheticFilter(opts.aesthetic, ctx)
     sink = ImageSink(save_dir, tag, opts.sink)
     ctx.log(f"Source: {opts.source}   Query: {query or '(visual search)'}")
     ctx.log(f"Destination: {save_dir}")

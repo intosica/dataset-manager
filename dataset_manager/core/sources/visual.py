@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import human
 from .search import YANDEX_ITEM, YANDEX_JS, _wait_tiles
 
 SIMILAR_ENGINES = ("Bing", "Yandex")
@@ -62,8 +63,7 @@ async def _click_more(page, selectors) -> None:
         try:
             for el in await page.query_selector_all(sel):
                 if await el.is_visible():
-                    await el.scroll_into_view_if_needed(timeout=2000)
-                    await el.click(timeout=3000)
+                    await human.click(page, el)
                     return
         except Exception:
             pass
@@ -88,9 +88,9 @@ async def _scroll_collect(page, extract, cap, ctx, more=()) -> list[str]:
             break
         if stagnant >= 4:
             break
-        for _ in range(random.randint(3, 6)):
-            await page.evaluate("(d) => window.scrollBy(0, d)", random.randint(400, 900))
-            await page.wait_for_timeout(random.randint(120, 350))
+        for _ in range(random.randint(2, 4)):
+            await human.scroll(page, random.randint(400, 900))
+            await human.pause(0.1, 0.35)
         await _click_more(page, more)
         await page.wait_for_timeout(random.randint(700, 1500))
     return best
@@ -102,8 +102,8 @@ async def _dismiss_cookies(page) -> None:
         try:
             btn = page.locator(f"button:has-text('{label}')").first
             if await btn.count() and await btn.is_visible():
-                await btn.click(timeout=3000)
-                await page.wait_for_timeout(500)
+                await human.click(page, btn)
+                await human.pause(0.4, 0.9)
                 return
         except Exception:
             pass
@@ -111,7 +111,8 @@ async def _dismiss_cookies(page) -> None:
 
 async def _bing(page, payload, cap, ctx):
     await page.goto("https://www.bing.com/images", wait_until="domcontentloaded")
-    await page.click("#sb_sbi", timeout=15000)
+    await human.click(page, page.locator("#sb_sbi"))
+    await human.pause(0.4, 0.9)
     await page.set_input_files("input[type=file]", payload)
     try:
         await page.wait_for_url(re.compile(r"bcid="), timeout=30000)
@@ -138,7 +139,8 @@ async def _yandex_open_similar(page, payload, ctx) -> bool:
         try:
             await page.goto("https://yandex.com/images/", wait_until="domcontentloaded")
             await page.wait_for_timeout(random.randint(500, 1200))
-            await page.click(".HeaderDesktopActions-CbirButton", timeout=15000)
+            await human.click(page, page.locator(".HeaderDesktopActions-CbirButton"))
+            await human.pause(0.4, 0.9)
             await page.set_input_files("input.CbirCore-FileInput", payload)
             await page.wait_for_url(re.compile(r"cbir_id="), timeout=30000)
         except Exception:
@@ -173,9 +175,9 @@ async def _yandex(page, payload, cap, ctx):
             break
         try:                                              # the button only renders near the end of the list
             for _ in range(random.randint(4, 7)):         # …and scroll there like a person would
-                await page.evaluate("(d) => window.scrollBy(0, d)", random.randint(300, 700))
-                await page.wait_for_timeout(random.randint(200, 500))
-            await page.wait_for_timeout(random.randint(1200, 2500))
+                await human.scroll(page, random.randint(300, 700))
+                await human.pause(0.2, 0.5)
+            await human.pause(1.2, 2.5)
         except Exception:
             break
         more = page.locator(".FetchListButton").first     # the orange 'Show more' under the grid
@@ -184,7 +186,7 @@ async def _yandex(page, payload, cap, ctx):
                 break
             await more.scroll_into_view_if_needed(timeout=3000)
             before_url, before_n = page.url, len(urls)
-            await more.click(timeout=8000)
+            await human.click(page, more)
         except Exception:
             break
         grew = False

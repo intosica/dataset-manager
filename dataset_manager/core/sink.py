@@ -30,6 +30,7 @@ class SinkOptions:
     caption: CaptionSpec = field(default_factory=CaptionSpec)
     sort_by_orientation: bool = True     # save into Landscape / Portrait / Square sub-folders
     similarity: object = None            # SimilarityFilter or None
+    aesthetic: object = None             # AestheticFilter or None
 
 
 class ImageSink:
@@ -95,6 +96,8 @@ class ImageSink:
                 img = im.convert("RGB")
             if self.opts.similarity is not None and not self.opts.similarity.keep(img):
                 return "rejected"
+            if self.opts.aesthetic is not None and not self.opts.aesthetic.keep(img):
+                return "rejected_aesthetic"
             if self.opts.resize:
                 img = resize_image(img, self.opts.target_dim, self.opts.direction, self.opts.snap_to_64)
             fld = orientation(*img.size)
@@ -116,4 +119,6 @@ class ImageSink:
     def summary(self) -> str:
         c = self.counts
         return (f"{c['saved']} saved, {c['duplicate'] + c['exists']} duplicates skipped, {c['small']} too small, "
-                f"{c['invalid']} unreadable" + (f", {c['rejected']} rejected by similarity" if c['rejected'] else ""))
+                f"{c['invalid']} unreadable"
+                + (f", {c['rejected']} rejected by similarity" if c['rejected'] else "")
+                + (f", {c['rejected_aesthetic']} below the aesthetic threshold" if c['rejected_aesthetic'] else ""))

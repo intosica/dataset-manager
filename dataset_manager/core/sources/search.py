@@ -15,6 +15,7 @@ from ..collector import CollectOptions
 from ..settings import Settings
 from ..sink import ImageSink
 from ..tasks import TaskContext
+from . import human
 from .filters import NO_SAFE_SEARCH, build_url, combos, describe
 
 YANDEX_ITEM = ".SerpItem, .serp-item"          # SerpItem = current markup, serp-item = the old one
@@ -77,19 +78,19 @@ async def _auto_scroll(page, engine: str, limit: int, ctx: TaskContext) -> None:
     for _ in range(rounds):
         if ctx.cancelled:
             break
-        for _ in range(random.randint(3, 6)):
-            await page.evaluate("(d) => window.scrollBy(0, d)", random.randint(300, 800))
-            await page.wait_for_timeout(random.randint(150, 450))
-            if random.random() > 0.6:
-                await page.mouse.move(random.randint(100, 800), random.randint(100, 600))
+        for _ in range(random.randint(2, 4)):
+            await human.scroll(page, random.randint(300, 800))
+            await human.pause(0.1, 0.4)
+            if random.random() > 0.7:
+                await human.move_to(page, random.randint(100, 800), random.randint(100, 600))
         if engine == "Bing":
             try:
                 btn = await page.query_selector("a.btn_seemore")
                 if btn and await btn.is_visible():
-                    await btn.click()
+                    await human.click(page, btn)
             except Exception:
                 pass
-        await page.wait_for_timeout(random.randint(900, 2200))
+        await human.pause(0.9, 2.2)
         h = await page.evaluate("document.documentElement.scrollHeight")
         stagnant = stagnant + 1 if h == last_h else 0
         last_h = h
@@ -238,8 +239,9 @@ async def _yandex_safe_search(page, off: bool, ctx: TaskContext) -> None:
             return ctx.log("Could not reach Yandex's search settings; leaving safe search as it is.")
         if await page.evaluate("v => document.querySelector(`input[name=filter_search_results][value=${v}]`).checked", want):
             return
-        await page.get_by_text("No filter" if off else "Moderate search", exact=True).click()
-        await page.click(".button-save__button")
+        await human.click(page, page.get_by_text("No filter" if off else "Moderate search", exact=True))
+        await human.click(page, page.locator(".button-save__button"))
+        await human.pause(0.8, 1.6)
         await page.wait_for_timeout(random.randint(1200, 2200))
         ctx.log(f"Yandex safe search: {'off' if off else 'moderate'}.")
     except Exception as exc:

@@ -26,6 +26,8 @@ class Settings:
     good_quality_tags: str = "masterpiece, high quality"
     low_quality_tags: str = "low quality, bad anatomy, worst quality"
     extra_tags: str = ""
+    install_target: str = "venv"      # venv | system — where optional packages from Preferences go
+    venv_dir: str = ""                # blank = <app data>/venv
 
     # ---- derived ----
     def library_path(self) -> str:

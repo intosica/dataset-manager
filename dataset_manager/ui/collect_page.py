@@ -5,6 +5,7 @@ import os
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from ..core import capabilities
+from ..core.aesthetic_score import NOTE, AestheticFilter, AestheticSpec
 from ..core.collector import CollectOptions, run_collection
 from ..core.similarity import BACKENDS, SHORT, SimilaritySpec
 from ..core.sink import SinkOptions
@@ -127,6 +128,17 @@ class CollectPage(Gtk.Box):
             g_sim.add(w)
         self.backend.connect("notify::selected", self._backend_changed)
 
+        # ---- aesthetic score filter ----
+        self.aesthetic = _switch("Keep only good-looking images", False,
+                                 "Scores each image 1–10 and skips the ones below the minimum. Optional package.")
+        self.aes_threshold = Adw.SpinRow(title="Minimum score", adjustment=Gtk.Adjustment(
+            value=5.5, lower=1, upper=10, step_increment=0.1, page_increment=0.5), digits=1,
+            subtitle="5.5 is a decent photo, 6.5+ is striking")
+        self.aes_note = NoteRow()
+        self.g_aes = Adw.PreferencesGroup(title="Aesthetic score")
+        for w in (self.aesthetic, self.aes_note, self.aes_threshold):
+            self.g_aes.add(w)
+
         # ---- actions + log ----
         self.start_btn = Gtk.Button(label="Start Collection")
         self.start_btn.add_css_class("suggested-action")
@@ -144,7 +156,7 @@ class CollectPage(Gtk.Box):
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=18, margin_bottom=18,
                           margin_start=12, margin_end=12)
-        for w in (g_source, self.g_safe, self.filters, self.g_seed, g_opts, g_sim):
+        for w in (g_source, self.g_safe, self.filters, self.g_seed, g_opts, g_sim, self.g_aes):
             content.append(w)
         clamp = Adw.Clamp(maximum_size=860, tightening_threshold=600, child=content)
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
@@ -167,12 +179,16 @@ class CollectPage(Gtk.Box):
                        (self.sort_orient, "notify::active"), (self.resize, "notify::active"),
                        (self.target, "notify::value"), (self.captions, "notify::active"), (self.extra, "changed"),
                        (self.backend, "notify::selected"), (self.pos_dir, "changed"), (self.neg_dir, "changed"),
-                       (self.threshold, "notify::value")]:
+                       (self.threshold, "notify::value"), (self.aesthetic, "notify::active"),
+                       (self.aes_threshold, "notify::value")]:
             w.connect(sig, self._edited)
         self.seed.connect("changed", lambda _r: self._seed_changed())
         self.filters.changed.append(self._edited)
         self._source_changed()
         self._backend_changed()
+        self.aesthetic.connect("notify::active", lambda *_: self._aesthetic_note())
+        self._aesthetic_note()
+        state.settings_changed.connect(self._aesthetic_note)
 
     # ---- session parameters ----
     def _edited(self, *_a) -> None:
@@ -197,6 +213,8 @@ class CollectPage(Gtk.Box):
             "similarity": {"enabled": sel > 0, "backend": self.backend_keys[max(sel - 1, 0)],
                            "positive_dir": self.pos_dir.get_text(), "negative_dir": self.neg_dir.get_text(),
                            "threshold": round(self.threshold.get_value(), 3)},
+            "aesthetic": {"enabled": self.aesthetic.get_active(),
+                          "threshold": round(self.aes_threshold.get_value(), 2)},
         }
 
     def set_params(self, p: dict) -> None:
@@ -205,6 +223,8 @@ class CollectPage(Gtk.Box):
         d.update({k: v for k, v in (p or {}).items() if k != "similarity"})
         sim = dict(d["similarity"])
         sim.update((p or {}).get("similarity") or {})
+        aes = dict(d["aesthetic"])
+        aes.update((p or {}).get("aesthetic") or {})
         self._loading = True
         try:
             if d["source"] in self.keys:
@@ -231,6 +251,8 @@ class CollectPage(Gtk.Box):
             self.pos_dir.set_text(sim["positive_dir"])
             self.neg_dir.set_text(sim["negative_dir"])
             self.threshold.set_value(float(sim["threshold"]))
+            self.aesthetic.set_active(bool(aes["enabled"]))
+            self.aes_threshold.set_value(float(aes["threshold"]))
         finally:
             self._loading = False
         self._backend_changed()
@@ -242,7 +264,8 @@ class CollectPage(Gtk.Box):
                 "randomize": False, "skip_duplicates": True, "sort_by_orientation": True, "resize": False,
                 "target_dim": s.target_dim, "captions": True, "extra_tags": s.extra_tags,
                 "similarity": {"enabled": False, "backend": self.backend_keys[0], "positive_dir": "",
-                               "negative_dir": "", "threshold": 0.0}}
+                               "negative_dir": "", "threshold": 0.0},
+                "aesthetic": {"enabled": False, "threshold": 5.5}}
 
     # ---- reactions ----
     def _reload(self) -> None:
@@ -269,6 +292,13 @@ class CollectPage(Gtk.Box):
         seed = self.seed.get_text().strip() if self.g_seed.get_visible() else ""
         self.query.set_visible(not seed)
         self.name.set_title("Collection name" if seed else "Collection name (defaults to the search terms)")
+
+    def _aesthetic_note(self, *_a) -> None:
+        if AestheticFilter.available():
+            self.aes_note.set_text(f"aesthetic-predictor-v2-5 is installed. {NOTE}.")
+        else:
+            self.aes_note.set_text("aesthetic-predictor-v2-5 is not installed — install it in Preferences → "
+                                   "System, or leave this off.")
 
     def _backend_changed(self, *_a) -> None:
         sel = self.backend.get_selected()
@@ -298,6 +328,8 @@ class CollectPage(Gtk.Box):
         simp = p["similarity"]
         sim = (SimilaritySpec(simp["backend"], simp["positive_dir"].strip(), simp["negative_dir"].strip(), simp["threshold"])
                if simp["enabled"] else SimilaritySpec())
+        aes = p["aesthetic"]
+        aesthetic = AestheticSpec(True, aes["threshold"]) if aes["enabled"] else AestheticSpec()
         seeds = [] if key not in SIMILAR_ENGINES else _expand_seeds(p["seed"], p["seed_count"])
         if p["seed"].strip() and key in SIMILAR_ENGINES and not seeds:
             self.panel.clear()
@@ -306,7 +338,7 @@ class CollectPage(Gtk.Box):
         opts = CollectOptions(
             source=key, query="" if seeds else p["query"], collection_name=p["name"], limit=p["limit"], randomize=p["randomize"],
             parallel=p["parallel"], safe_search_off=p["safe_search_off"] and key not in NO_SAFE_SEARCH,
-            filters={} if artist else self.filters.selection(), similarity=sim, seeds=seeds,
+            filters={} if artist else self.filters.selection(), similarity=sim, seeds=seeds, aesthetic=aesthetic,
             sink=SinkOptions(min_side=p["min_side"], resize=p["resize"], target_dim=s.target_dim,
                              direction=s.scale_direction, snap_to_64=s.snap_to_64, skip_duplicates=p["skip_duplicates"],
                              duplicate_threshold=s.duplicate_threshold, write_captions=p["captions"],

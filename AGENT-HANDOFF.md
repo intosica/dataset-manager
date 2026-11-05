@@ -1,7 +1,9 @@
 # Agent handoff
 
-Read this before you change anything. **Update it before you finish**: what you changed, what is still open, and what
-you could not test. Keep it short.
+Read this before you change anything. **Always update this file when your change is relevant** — new behaviour,
+new settings, new files, fixed bugs, changed test steps, anything the next agent must know — and before you finish
+record what you changed, what is still open, and what you could not test. Keep it short; put the detail in a
+changelog entry and the lasting rules in the sections above it.
 
 ## Project
 
@@ -58,6 +60,24 @@ and `ui/`.
   * A headless smoke test of stealth plus `human.click`/`human.scroll`. It must show `navigator.webdriver == False`
     and the click and scroll must land.
 * Do not run `find /` on this machine. `/media/montel/Elements` is a slow USB disk.
+
+## README screenshots
+
+Never screenshot a real library. Build the throwaway demo library first and photograph that:
+
+    python3 tests/make_cat_library.py /tmp/catlib     # 13–16 CC0 cat photos from Wikimedia Commons
+
+Then, to photograph the app against it, back up the real config, write a demo one, run the screenshot script, and
+put the real config back (flatpak overrides `XDG_CONFIG_HOME`, so there is no other way):
+
+* save `~/.var/app/io.github.intosica.DatasetManager/config/dataset-manager/{settings,sessions}.json` somewhere;
+* in `settings.json` set `library_dir` to the demo folder (and blank `hydra_path` / `wd_path` / `joycaption_path` /
+  `hf_cache_dir`); rewrite the session names and queries in `sessions.json` to demo terms so the sidebar is clean;
+* run the script under Xvfb with `--filesystem=/tmp`, take the shots, `app.quit()`, restore both files.
+
+Screenshots live in `docs/screenshots/` (1200 px wide, 256-colour PNG, about 150–250 KB each) and are referenced
+from `README.md`: `library.png` is the hero image, `tag-editor.png` and `collect.png` sit side by side under
+Layout. Quantise with `Image.quantize(colors=256)` before committing; plain PNGs are 3× larger.
 
 ## Spoofing (don't break)
 
@@ -130,6 +150,12 @@ and `ui/`.
     `original_images/` folder beside it before the upscale overwrites it.
 * Preferences → Library: "Tag Editor follows the Library page" (`settings.tag_editor_follow_library`) makes the
   editor open whatever collection row is selected on the Library page (`state.library_selected`).
+
+* README: the old GitHub-attachment screenshot (a private dataset) is gone. The hero image, the Tag Editor shot and
+the Collect shot now come from an isolated demo library of CC0 cat photos (`tests/make_cat_library.py`, which
+re-downloads it on demand); the README credits them and says they are CC0.
+* Pushed as `95e81ed` (Tag Editor / taggers / JoyCaption / model downloads / Library sort+upscale+preserve) and
+  `2553020` (screenshots, demo-library script).
 
 ### Open / ideas
 * `sink.ingest` runs one image at a time per batch. Hashing and filtering could be parallelised, but the sink is not

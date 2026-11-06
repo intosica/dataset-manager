@@ -5,6 +5,7 @@ user still presses Save Tags / Save All Tags.
 """
 from __future__ import annotations
 
+import logging
 import re
 import threading
 
@@ -77,6 +78,8 @@ def _load(settings):
         return _llm
     from llama_cpp import Llama
     unload()
+    if note := capabilities.llama_gpu_note():
+        logging.getLogger(__name__).warning(note)
     _llm = Llama(model_path=path, n_ctx=4096, n_gpu_layers=-1, verbose=False)
     _llm_path = path
     return _llm

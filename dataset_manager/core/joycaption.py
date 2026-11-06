@@ -142,7 +142,10 @@ class GGUFCaptioner:
                 "{% if add_generation_prompt %}<|start_header_id|>assistant<|end_header_id|>\n\n{% endif %}"
             )
 
-        import os
+        import logging, os
+        from . import capabilities
+        if note := capabilities.llama_gpu_note():
+            logging.getLogger(__name__).warning(note)
         self.llm = Llama(model_path=model, chat_handler=JoyCaptionChatHandler(clip_model_path=mmproj, verbose=False),
                          n_ctx=4096, n_gpu_layers=-1, n_threads=max(1, (os.cpu_count() or 2) - 1), verbose=False)
 

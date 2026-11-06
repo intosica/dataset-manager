@@ -109,7 +109,7 @@ Face:
 | [Qwen3.8 27B · uncensored](https://huggingface.co/philbert440/Qwen3.8-27B-Uncensored-Cyber-GGUF) | 29 GB | untested; needs a big GPU and a recent llama.cpp |
 | Phi-4 mini · instruct / abliterated / heretic | 3.8 GB | the earlier default |
 
-It needs `llama-cpp-python` (Preferences → System; CPU build, no GPU required). The model never sees the image: the
+It needs `llama-cpp-python` (Preferences → System; the CPU build works anywhere but ignores the GPU — for an NVIDIA card rebuild it with `CMAKE_ARGS="-DGGML_CUDA=on" pip install --force-reinstall --no-cache-dir llama-cpp-python`; the log warns when the CPU build is in use). The model never sees the image: the
 caption is the only input. On a 12-core CPU a split takes 2–7 s and a tidy 5–12 s with the 1.5B Q8_0.
 
 Every download in Preferences has a **Remove** button — taggers, JoyCaption, Florence 2, the text model and the cached

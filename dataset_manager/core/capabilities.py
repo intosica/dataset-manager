@@ -67,3 +67,15 @@ def report() -> list[dict]:
 def pip_hint(modules) -> str:
     pkgs = [p for m in modules for p in FEATURES[m]["pip"]]
     return "pip install " + " ".join(dict.fromkeys(pkgs))
+
+
+def llama_gpu_note() -> str:
+    """Empty if llama-cpp-python can offload to the GPU; otherwise why layers silently stay on the CPU."""
+    try:
+        import llama_cpp
+        if llama_cpp.llama_supports_gpu_offload():
+            return ""
+    except Exception:
+        return ""
+    return ("llama-cpp-python is a CPU-only build, so n_gpu_layers=-1 is ignored. For CUDA: "
+            'CMAKE_ARGS="-DGGML_CUDA=on" pip install --force-reinstall --no-cache-dir llama-cpp-python')

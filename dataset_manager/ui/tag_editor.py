@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
-from ..core import capabilities, joycaption, models, tagedit, taggers
+from ..core import capabilities, joycaption, models, tagedit, taggers, textllm
 from ..core.captions import split_tags
 from ..core.imaging import make_thumbnail
 from .image_menu import attach_image_menu
@@ -20,6 +20,8 @@ TAG_MODES = [("merge", "Add missing tags"), ("prepend", "Put new tags first"), (
              ("skip", "Skip images that have tags")]
 JOY_MODES = [("replace", "Replace the caption"), ("merge", "Append to the caption"),
              ("skip", "Skip images that have captions")]
+_PHI_MISSING = ("Phi-4 mini is not ready: download a GGUF in Preferences → Models and install llama-cpp-python in "
+                "Preferences → System.")
 _pool = ThreadPoolExecutor(max_workers=min(6, os.cpu_count() or 2), thread_name_prefix="thumbs")
 
 
@@ -58,6 +60,9 @@ class TagEditor(Gtk.Box):
         self._filter_id = self._tags_id = 0
         self._preview_tok = 0
         self._cells: dict = {}                         # image -> overlay of its bound grid cell
+        self._para: set[str] = set()                   # captions written as paragraphs (blank line between them)
+        self._disk_para: set[str] = set()
+        self.phi_status = models.find_phi(state.settings) or ""       # cheap: one small folder
 
         # ---- toolbar ----
         bar = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=8, margin_bottom=8)
@@ -73,9 +78,14 @@ class TagEditor(Gtk.Box):
         self.count = Gtk.Label(css_classes=["dim-label", "numeric"])
         self.recursive = Gtk.CheckButton(label="Subfolders", active=True)
         self.recursive.connect("toggled", lambda _b: self.reload())
+        self.select_all_btn = icon_button("edit-select-all-symbolic", "Select all images",
+                                         lambda: self.sel.select_all())
+        self.select_none_btn = icon_button("edit-select-none-symbolic", "Select none",
+                                           lambda: self.sel.unselect_all())
         self.save_all_btn = Gtk.Button(label="Save All Tags", sensitive=False)
         self.save_all_btn.connect("clicked", lambda _b: self.save_all())
-        for w in (open_btn, lib_btn, self.reload_btn, self.recursive, self.search, self.count, self.save_all_btn):
+        for w in (open_btn, lib_btn, self.reload_btn, self.select_all_btn, self.select_none_btn, self.recursive,
+                  self.search, self.count, self.save_all_btn):
             bar.append(w)
 
         # ---- grid ----
@@ -109,6 +119,7 @@ class TagEditor(Gtk.Box):
         side.append(self._tags_group())
         side.append(self._autotag_group())
         side.append(self._joy_group())
+        side.append(self._phi_group())
         side_scroll = self.side_scroll = Gtk.ScrolledWindow(child=Adw.Clamp(child=side, maximum_size=520), hscrollbar_policy=Gtk.PolicyType.NEVER,
                                          vexpand=True)
         self.panel = TaskPanel(min_height=90)
@@ -196,8 +207,14 @@ class TagEditor(Gtk.Box):
         self.cap_name.set_hexpand(True)
         for b in (self.trash_btn, self.revert_btn, self.save_btn):
             row.append(b)
+        self.nav = nav = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        self.prev_btn = icon_button("go-previous-symbolic", "Previous image", lambda: self._step(-1), flat=False)
+        self.next_btn = icon_button("go-next-symbolic", "Next image", lambda: self._step(1), flat=False)
+        self.cap_pos = Gtk.Label(css_classes=["dim-label", "numeric"])
+        for w in (self.prev_btn, self.cap_pos, self.next_btn):
+            nav.append(w)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        for w in (self.preview, frame, grip, row):
+        for w in (self.preview, nav, frame, grip, row):
             box.append(w)
         g.add(box)
         keys = Gtk.EventControllerKey()
@@ -257,6 +274,20 @@ class TagEditor(Gtk.Box):
             [("sort", "Sort A–Z"), ("dedupe", "Remove Duplicates"), ("truncate", "Keep First Tags")],
             "Sort every caption alphabetically, drop repeated tags, or cut captions down to their first tags "
             "(useful for trainers with a token limit).")
+        rw = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8)
+        rw.append(hint("Phi-4 mini rewrites the selected captions on this computer — it never sees the images. "
+                       "Nothing is saved: review the result, then press Save All Tags."))
+        self.phi_btns = []
+        rw_btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
+        for task, label in (("paragraphs", "Split Paragraphs"), ("tidy", "Tidy Text")):
+            b = Gtk.Button(label=label)
+            b.connect("clicked", lambda _b, t=task: self._phi_batch(t))
+            self.phi_btns.append(b)
+            rw_btns.append(b)
+        rw.append(rw_btns)
+        self.phi_batch_note = hint()
+        rw.append(self.phi_batch_note)
+        self.batch_stack.add_titled(rw, "rewrite", "Rewrite")
         switcher = Gtk.StackSwitcher(stack=self.batch_stack, halign=Gtk.Align.CENTER)
         self.batch_stack.connect("notify::visible-child-name", lambda *_a: self._batch_preview())
         self.batch_preview = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"], margin_top=6)
@@ -360,6 +391,27 @@ class TagEditor(Gtk.Box):
         self.state.settings_changed.connect(self._model_status)
         return g
 
+    def _phi_group(self) -> Gtk.Widget:
+        g = Adw.PreferencesGroup(
+            title="Rewrite with Phi-4 mini",
+            description="Text only — the model never sees the image. Splits a caption into paragraphs or trims "
+                        "repetition. Nothing is saved until you press Save Tags.")
+        self.phi_note = NoteRow()
+        self.phi_note.set_text(_PHI_MISSING)
+        self.phi_para_btn = Gtk.Button(label="Split Paragraphs",
+                                       tooltip_text="Break this caption at changes of subject, setting, or action")
+        self.phi_tidy_btn = Gtk.Button(label="Tidy Text",
+                                       tooltip_text="Remove repetition and redundant wording, keeping every detail")
+        self.phi_para_btn.connect("clicked", lambda _b: self._phi_one("paragraphs"))
+        self.phi_tidy_btn.connect("clicked", lambda _b: self._phi_one("tidy"))
+        btns = Gtk.Box(spacing=6, halign=Gtk.Align.START, margin_top=6)
+        for b in (self.phi_para_btn, self.phi_tidy_btn):
+            btns.append(b)
+        g.add(self.phi_note)
+        g.add(btns)
+        self._update_phi_ui()
+        return g
+
     # ================= grid cells =================
     def _setup_cell(self, _f, li) -> None:
         pic = Gtk.Picture(content_fit=Gtk.ContentFit.COVER, can_shrink=True, width_request=THUMB,
@@ -384,6 +436,7 @@ class TagEditor(Gtk.Box):
         pic, badge = ov.get_child(), ov.get_last_child()
         pic.path = item.path
         self._cells[item.path] = ov
+        (ov.add_css_class if self.sel.is_selected(li.get_position()) else ov.remove_css_class)("sel")
         self._update_cell(item.path, ov)
         self._wanted.add(item.path)
         tex = self._tex.get(item.path)
@@ -482,9 +535,12 @@ class TagEditor(Gtk.Box):
                        lambda exc: (self.count.set_text(""), self._toast(f"Could not read the folder: {exc}")))
 
     def _loaded(self, result) -> None:
-        folder, caps = result
+        folder, found = result
         if folder != self.folder:
             return
+        caps = {p: tags for p, (tags, _para) in found.items()}
+        self._disk_para = {p for p, (_tags, para) in found.items() if para}
+        self._para = (self._para & set(caps)) | self._disk_para
         self._disk = dict(caps)                    # staged edits survive a reload
         self.captions = dict(caps)
         self.captions.update({p: t for p, t in self._reload_pending.items() if p in self.captions})
@@ -540,27 +596,32 @@ class TagEditor(Gtk.Box):
             self.save_current()
             self.current = one
             self._show_caption()
+        chosen = set(sel)
+        for path, ov in self._cells.items():
+            (ov.add_css_class if path in chosen else ov.remove_css_class)("sel")
         n = len(self.targets())
         what = f"{len(sel):,} selected images" if sel else f"all {n:,} shown images"
         self.batch.set_description(f"Applies to {what}.")
         self._batch_preview()
         busy = self.panel.busy
-        self.tag_btn.set_label(f"Tag {n:,} Images" if n != 1 else "Tag 1 Image")
-        self.joy_btn.set_label(f"Caption {n:,} Images" if n != 1 else "Caption 1 Image")
+        self.tag_btn.set_label(f"Tag {n:,} Images" if n > 1 else "Tag image")
+        self.joy_btn.set_label(f"Caption {n:,} Images" if n > 1 else "Caption image")
         for b in (self.tag_btn, self.joy_btn):
             b.set_sensitive(n > 0 and not busy)
         self.trash_btn.set_sensitive(bool(sel) and not busy)
+        self._update_phi_ui()
         self._fill_tags()
 
     def _show_caption(self) -> None:
         self._loading_caption = True
         p = self.current
         self.cap_view.set_sensitive(p is not None and not self.panel.busy)
-        self.cap_buf.set_text(", ".join(self.captions.get(p, [])) if p else "")
+        self.cap_buf.set_text(self._join(p))
         self.cap_name.set_text(os.path.basename(p) if p else
                                ("Select one image to edit its caption" if self.captions else ""))
         self._loading_caption = False
         self._update_save_ui()
+        self._update_nav()
         self._preview_tok += 1
         tok = self._preview_tok
         if not p:
@@ -579,9 +640,40 @@ class TagEditor(Gtk.Box):
         if getattr(self, "_loading_caption", False) or not self.current:
             return
         text = self.cap_buf.get_text(self.cap_buf.get_start_iter(), self.cap_buf.get_end_iter(), False)
-        self._stage({self.current: split_tags(text)}, refresh=False)
+        tags, para = tagedit.split_caption(text)
+        self._set_para(self.current, para)
+        self._stage({self.current: tags}, refresh=False)
         if self.current in self._cells:
             self._update_cell(self.current, self._cells[self.current])
+
+    def _join(self, path: str | None) -> str:
+        """The caption as shown and copied: paragraphs keep their blank lines, tags stay comma-separated."""
+        if not path:
+            return ""
+        return tagedit.join_caption(self.captions.get(path, []), path in self._para)
+
+    def _set_para(self, path: str, para: bool) -> None:
+        if para:
+            self._para.add(path)
+        else:
+            self._para.discard(path)
+
+    def _update_nav(self) -> None:
+        p, busy = self.current, self.panel.busy
+        i = self.shown.index(p) if p in self.shown else -1
+        self.cap_pos.set_text(f"{i + 1:,} / {len(self.shown):,}" if i >= 0 else "")
+        self.prev_btn.set_sensitive(i > 0 and not busy)
+        self.next_btn.set_sensitive(0 <= i < len(self.shown) - 1 and not busy)
+
+    def _step(self, delta: int) -> None:
+        """Previous / next image in the filtered grid: select it and scroll it into view."""
+        if not self.shown:
+            return
+        i = self.shown.index(self.current) + delta if self.current in self.shown else 0
+        i = max(0, min(len(self.shown) - 1, i))
+        self.sel.unselect_all()
+        self.sel.select_item(i, True)
+        self.grid.scroll_to(i, Gtk.ListScrollFlags.NONE)
 
     # ---- staged captions: memory until Save Tags ----
     def dirty(self) -> dict[str, list[str]]:
@@ -607,6 +699,7 @@ class TagEditor(Gtk.Box):
     def _discard(self) -> None:
         """Drop every staged edit (the caption box included) and go back to what is on disk."""
         self.captions = dict(self._disk)
+        self._para = set(self._disk_para)
         self._show_caption()
         self._refresh_cells()
 
@@ -629,12 +722,15 @@ class TagEditor(Gtk.Box):
         if not self.current:
             return
         text = self.cap_buf.get_text(self.cap_buf.get_start_iter(), self.cap_buf.get_end_iter(), False)
-        self._stage({self.current: split_tags(text)}, refresh=False)
+        tags, para = tagedit.split_caption(text)
+        self._set_para(self.current, para)
+        self._stage({self.current: tags}, refresh=False)
 
     def _revert_current(self) -> None:
         p = self.current
         if not p:
             return
+        self._set_para(p, p in self._disk_para)
         self._stage({p: self._disk.get(p, [])})
         self._show_caption()
 
@@ -650,7 +746,7 @@ class TagEditor(Gtk.Box):
         failed = []
         for p, tags in pending.items():
             try:
-                tagedit.write_tags(p, tags)
+                tagedit.write_caption(p, tags, p in self._para)
                 self._disk[p] = tags
             except OSError as exc:
                 failed.append(f"{os.path.basename(p)}: {exc}")
@@ -696,6 +792,12 @@ class TagEditor(Gtk.Box):
     def _grid_key(self, _c, keyval, _code, mods) -> bool:
         if keyval == Gdk.KEY_Delete:
             self._trash_selected()
+            return True
+        if keyval == Gdk.KEY_Left:
+            self._step(-1)
+            return True
+        if keyval == Gdk.KEY_Right:
+            self._step(1)
             return True
         if keyval == Gdk.KEY_a and mods & Gdk.ModifierType.CONTROL_MASK:
             self.sel.select_all()
@@ -755,7 +857,7 @@ class TagEditor(Gtk.Box):
         for op in ("sort", "dedupe", "truncate"):
             self._batch_btns[op].set_sensitive(n > 0 and not self.panel.busy)
         op = self.batch_stack.get_visible_child_name()
-        if op == "tidy" or n > 20000:
+        if op in ("tidy", "rewrite") or n > 20000:
             self.batch_preview.set_text("")
         elif self._batch_fn(op) is None:
             self.batch_preview.set_text("Fill in the field above to see what will change.")
@@ -763,6 +865,11 @@ class TagEditor(Gtk.Box):
             c = len(self._batch_changes(op))
             self.batch_preview.set_text(f"Will change {c:,} of {n:,} captions." if c else
                                         f"Nothing to change in these {n:,} captions.")
+        ready = bool(self.phi_status)
+        for b in getattr(self, "phi_btns", []):
+            b.set_sensitive(n > 0 and ready and not self.panel.busy)
+        if getattr(self, "phi_batch_note", None) is not None:
+            self.phi_batch_note.set_text("" if ready else _PHI_MISSING)
 
     def _batch(self, op: str) -> None:
         self.save_current()
@@ -789,6 +896,94 @@ class TagEditor(Gtk.Box):
             self._show_caption()
             self._toast("Undone.")
 
+    # ================= Phi-4 mini =================
+    def _update_phi_ui(self) -> None:
+        ready = bool(self.phi_status)
+        busy = bool(self.panel.busy) if hasattr(self, "panel") else True
+        for b in (getattr(self, "phi_para_btn", None), getattr(self, "phi_tidy_btn", None)):
+            if b is not None:
+                b.set_sensitive(bool(self.current) and ready and not busy)
+        note = getattr(self, "phi_note", None)
+        if note is not None:
+            note.set_text("Model: " + self.phi_status if ready else _PHI_MISSING)
+        if hasattr(self, "batch_stack"):
+            self._batch_preview()
+
+    def _phi_one(self, task: str) -> None:
+        """Rewrite the open caption; it stays staged until the user presses Save Tags."""
+        self.save_current()
+        p = self.current
+        if not p:
+            return
+        text = self._join(p)
+        if not text.strip():
+            self._toast("This image has no caption yet.")
+            return
+        old, old_para = list(self.captions.get(p, [])), p in self._para
+        self.panel.run(lambda ctx: textllm.rewrite(self.state.settings, text, task, ctx),
+                       lambda new: self._phi_done(p, new, old, old_para), name="Rewriting with Phi-4")
+
+    def _phi_done(self, p: str, new: str, old: list, old_para: bool) -> None:
+        if self.folder and not os.path.exists(p):
+            return
+        tags, para = tagedit.split_caption(new)
+        if not tags:
+            self._toast("Phi-4 returned an empty caption; nothing changed.")
+            return
+        if tags == old:
+            self._toast("Phi-4 changed nothing.")
+            return
+        self._undo = {p: old}
+        self.undo_btn.set_sensitive(True)
+        self._set_para(p, para)
+        self._stage({p: tags})
+        self._show_caption()
+        self._fill_tags()
+        self.panel.log(f"{os.path.basename(p)}: {new[:400]}")
+        self._toast("Rewritten — press Save Tags to write it.")
+
+    def _phi_batch(self, task: str) -> None:
+        """Rewrite every selected caption; results are staged for Save All Tags, never written here."""
+        self.save_current()
+        files, folder = self.targets(), self.folder
+        texts = {f: self._join(f) for f in files}
+        work = {f: t for f, t in texts.items() if t.strip()}
+        if not work:
+            self._toast("Those images have no captions yet.")
+            return
+        old = {f: list(self.captions.get(f, [])) for f in files}
+        s, done = self.state.settings, {}
+
+        def job(ctx):
+            for i, (f, text) in enumerate(work.items()):
+                if ctx.cancelled:
+                    break
+                ctx.progress(i, len(work), f"{i + 1} / {len(work)} captions")
+                try:
+                    new = textllm.rewrite(s, text, task, ctx)
+                except Exception as exc:          # one bad caption must not lose the rest
+                    ctx.log(f"{os.path.basename(f)}: {exc}")
+                    continue
+                tags, para = tagedit.split_caption(new)
+                if tags and tags != old[f]:
+                    done[f] = (tags, para)
+            return done
+
+        def finished(found):
+            if self.folder != folder or not found:
+                self.panel.log("Phi-4 did not change anything.")
+                return
+            self._undo = {f: old[f] for f in found}
+            self.undo_btn.set_sensitive(True)
+            for f, (_tags, para) in found.items():
+                self._set_para(f, para)
+            self._stage({f: tags for f, (tags, _p) in found.items()})
+            self._show_caption()
+            self._fill_tags()
+            self.panel.log(f"Rewrote {len(found):,} captions — press Save All Tags to write them.")
+
+        self.panel.run(job, finished, name="Rewriting with Phi-4")
+
     def _trash_selected(self) -> None:
         sel = self.selected()
         if not sel:
@@ -804,6 +999,8 @@ class TagEditor(Gtk.Box):
                         desktop_trash(sc)
                     self.captions.pop(p, None)
                     self._disk.pop(p, None)
+                    self._para.discard(p)
+                    self._disk_para.discard(p)
                     if self._undo:
                         self._undo.pop(p, None)
             self.current = None
@@ -882,7 +1079,7 @@ class TagEditor(Gtk.Box):
         s, key = self.state.settings, self.state.settings.tagger
         self._status_tok = tok = getattr(self, "_status_tok", 0) + 1
         run_background(lambda: (tok, key, models.status(key, s), models.find_florence_models(s),
-                                models.find_joycaption(s)), self._show_status)
+                                models.find_joycaption(s), models.find_phi(s)), self._show_status)
 
     def _sync_taggers(self, florence: list) -> None:
         pairs = list(TAGGERS) + [
@@ -904,9 +1101,11 @@ class TagEditor(Gtk.Box):
             self._syncing_taggers = False
 
     def _show_status(self, r) -> None:
-        tok, key, found, florence, j = r
+        tok, key, found, florence, j, phi = r
         if tok != self._status_tok:
             return
+        self.phi_status = phi or ""
+        self._update_phi_ui()
         self._sync_taggers(florence)
         s = self.state.settings
         is_florence = key.startswith("florence:")
@@ -943,10 +1142,11 @@ class TagEditor(Gtk.Box):
     def _busy(self, busy: bool) -> None:
         # the AI jobs write captions in the background: no manual edits or folder switches meanwhile
         for w in (self.batch, self.reload_btn, self.open_btn, self.lib_btn, self.recursive, self.cap_view,
-                  self.trash_btn):
+                  self.trash_btn, self.prev_btn, self.next_btn):
             w.set_sensitive(not busy)
         self.cap_view.set_sensitive(not busy and self.current is not None)
         self._selection_changed()
+        self._update_nav()
 
     def _autotag(self) -> None:
         self.save_current()
@@ -1029,4 +1229,5 @@ class TagEditor(Gtk.Box):
             return
         taggers.unload()
         joycaption.unload()
+        textllm.unload()
         self._toast("Models unloaded.")

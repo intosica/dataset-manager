@@ -23,15 +23,34 @@ def list_images(folder: str, recursive: bool = True) -> list[str]:
     return out
 
 
-def read_tags(image: str) -> list[str]:
+def split_caption(text: str) -> tuple[list[str], bool]:
+    """The caption's parts, plus whether it is prose split into paragraphs (a blank line between them).
+
+    Paragraph captions keep their commas: splitting them into tags would squeeze the prose back onto one line.
+    """
+    text = (text or "").strip()
+    if re.search(r"\n\s*\n", text):
+        return [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()], True
+    return split_tags(text), False
+
+
+def read_caption(image: str) -> tuple[list[str], bool]:
     try:
         with open(sidecar(image), encoding="utf-8", errors="replace") as f:
-            return split_tags(f.read())
+            return split_caption(f.read())
     except OSError:
-        return []
+        return [], False
 
 
-def write_tags(image: str, tags: list[str]) -> None:
+def read_tags(image: str) -> list[str]:
+    return read_caption(image)[0]
+
+
+def join_caption(tags: list[str], paragraphs: bool = False) -> str:
+    return "\n\n".join(t for t in tags if t.strip()) if paragraphs else ", ".join(tags)
+
+
+def write_caption(image: str, tags: list[str], paragraphs: bool = False) -> None:
     """Writes the .txt sidecar; an empty tag list removes it (undo of a first caption leaves no empty file)."""
     path = sidecar(image)
     if not tags:
@@ -40,12 +59,16 @@ def write_tags(image: str, tags: list[str]) -> None:
         return
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write(", ".join(tags))
+        f.write(join_caption(tags, paragraphs))
     os.replace(tmp, path)
 
 
-def load(folder: str, recursive: bool = True) -> dict[str, list[str]]:
-    return {p: read_tags(p) for p in list_images(folder, recursive)}
+def write_tags(image: str, tags: list[str]) -> None:
+    write_caption(image, tags)
+
+
+def load(folder: str, recursive: bool = True) -> dict[str, tuple[list[str], bool]]:
+    return {p: read_caption(p) for p in list_images(folder, recursive)}
 
 
 # ---- filtering ----
@@ -136,4 +159,10 @@ if __name__ == "__main__":
     assert keep_first(t, 2) == ["1girl", "Solo"]
     assert merge(t, ["a"], "skip") is None and merge([], ["a"], "skip") == ["a"]
     assert merge(["x"], ["a", "x"], "prepend") == ["a", "x"] and merge(["x"], ["a"], "merge") == ["x", "a"]
+    tags, para = split_caption("A cat sits on a windowsill, sunlight behind it.\n\nThe room is quiet, warm and dim.")
+    assert para and tags == ["A cat sits on a windowsill, sunlight behind it.", "The room is quiet, warm and dim."]
+    assert join_caption(tags, para) == "A cat sits on a windowsill, sunlight behind it.\n\nThe room is quiet, warm and dim."
+    assert split_caption("1girl, solo") == (["1girl", "solo"], False)
+    assert split_caption("1girl\nsolo") == (["1girl", "solo"], False)
+    assert split_caption("") == ([], False)
     print("tagedit ok")

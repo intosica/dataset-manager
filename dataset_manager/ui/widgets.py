@@ -22,6 +22,7 @@ CSS = """
 .log { font-family: monospace; font-size: 0.9em; padding: 6px; }
 .drop-active { background: alpha(@accent_bg_color, .25); }
 .thumb { border-radius: 8px; }
+.sel { border: 3px solid @accent_bg_color; border-radius: 9px; }
 .score-badge { border-radius: 0 0 8px 0; padding: 2px 8px; margin: 0; }
 .sessions row.folder-row { font-weight: bold; }
 """

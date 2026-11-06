@@ -83,7 +83,7 @@ class QuickCaption(TagEditor):
         toolbar = self.get_first_child()
         toolbar.set_visible(False)
         toolbar.get_next_sibling().set_visible(False)             # its separator
-        for w in (self.save_btn, self.revert_btn, self.trash_btn, self.preview):
+        for w in (self.save_btn, self.revert_btn, self.trash_btn, self.preview, self.batch, self.nav):
             w.set_visible(False)
         self.cap_row.append(icon_button("edit-copy-symbolic", "Copy the tags", self._copy, flat=False))
         self.drop = ImageDrop(self.set_image, "Quick Caption",
@@ -127,6 +127,7 @@ class QuickCaption(TagEditor):
             return
         self.drop.set_path(dst)
         self.folder = self._tmp
+        self._para.clear()
         self.reload()
 
     def _loaded(self, result) -> None:
@@ -137,7 +138,7 @@ class QuickCaption(TagEditor):
 
     def _copy(self) -> None:
         self.save_current()
-        text = ", ".join(self.captions.get(self.current, [])) if self.current else ""
+        text = self._join(self.current)
         if text:
             self.get_clipboard().set(text)
             self._toast("Copied to the clipboard.")

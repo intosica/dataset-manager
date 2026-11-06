@@ -34,6 +34,9 @@ class Settings:
     wd_path: str = ""
     joycaption_path: str = ""
     florence_path: str = ""         # blank = auto-detect ComfyUI models/LLM
+    phi_path: str = ""              # blank = <app data>/models/phi; the chosen GGUF's folder (or file)
+    phi_repo: str = ""               # blank = heretic; see models.PHI_REPOS
+    phi_file: str = ""               # blank = heretic Q8_0
     hf_cache_dir: str = ""            # blank = app cache; where CLIP / aesthetic / similarity models go
     tag_threshold: float = 0.0       # 0 = automatic (Hydra: calibrated per tag · WD: 0.35)
     tag_editor_dir: str = ""          # last folder opened in the Tag Editor

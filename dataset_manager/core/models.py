@@ -8,6 +8,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,106 @@ MODELS = {
                                 "tokenizer.json", "tokenizer_config.json", "model.safetensors.index.json"]
                                + [f"model-0000{i}-of-00004.safetensors" for i in range(1, 5)]},
 }
+
+
+# ---- Phi-4 mini (GGUF, text only): rewrites captions. One choice = repo + file. ----
+PHI_DEFAULT = ("richardyoung/Phi-4-mini-instruct-heretic-GGUF", "Phi-4-mini-instruct-heretic-Q8_0.gguf")
+PHI_REPOS = {
+    "unsloth/Phi-4-mini-instruct-GGUF": ("Phi-4 mini · instruct", {
+        "Q4_K_M": ("Phi-4-mini-instruct-Q4_K_M.gguf", "2.3 GB"),
+        "Q5_K_M": ("Phi-4-mini-instruct-Q5_K_M.gguf", "2.7 GB"),
+        "Q6_K": ("Phi-4-mini-instruct-Q6_K.gguf", "2.9 GB"),
+        "Q8_0": ("Phi-4-mini-instruct.Q8_0.gguf", "3.8 GB"),
+    }),
+    "Melvin56/Phi-4-mini-instruct-abliterated-GGUF": ("Phi-4 mini · abliterated", {
+        "Q4_K_M": ("phi-4-mini-instruct-abliterated-Q4_K_M.gguf", "2.3 GB"),
+        "Q5_K_M": ("phi-4-mini-instruct-abliterated-Q5_K_M.gguf", "2.7 GB"),
+        "Q6_K": ("phi-4-mini-instruct-abliterated-Q6_K.gguf", "2.9 GB"),
+        "Q8_0": ("phi-4-mini-instruct-abliterated-Q8_0.gguf", "3.8 GB"),
+    }),
+    "richardyoung/Phi-4-mini-instruct-heretic-GGUF": ("Phi-4 mini · heretic", {
+        "Q4_K_M": ("Phi-4-mini-instruct-heretic-Q4_K_M.gguf", "2.3 GB"),
+        "Q5_K_M": ("Phi-4-mini-instruct-heretic-Q5_K_M.gguf", "2.6 GB"),
+        "Q6_K": ("Phi-4-mini-instruct-heretic-Q6_K.gguf", "2.9 GB"),
+        "Q8_0": ("Phi-4-mini-instruct-heretic-Q8_0.gguf", "3.8 GB"),
+    }),
+}
+
+
+def phi_choice(settings) -> tuple[str, str]:
+    """The chosen (repo, filename), falling back to heretic Q8_0."""
+    repo = getattr(settings, "phi_repo", "") or PHI_DEFAULT[0]
+    fname = getattr(settings, "phi_file", "") or PHI_DEFAULT[1]
+    if repo not in PHI_REPOS or fname not in [f for f, _s in PHI_REPOS[repo][1].values()]:
+        return PHI_DEFAULT
+    return repo, fname
+
+
+def phi_root(settings) -> Path:
+    p = paths.resolve(getattr(settings, "phi_path", ""))
+    if p:
+        p = Path(p)
+        return p.parent if p.is_file() else p
+    return paths.data_dir() / "models" / "phi"
+
+
+def phi_dir(settings) -> Path:
+    return phi_root(settings) / phi_choice(settings)[0].rsplit("/", 1)[-1]
+
+
+def find_phi(settings) -> str | None:
+    repo, fname = phi_choice(settings)
+    explicit = paths.resolve(getattr(settings, "phi_path", ""))
+    if explicit and Path(explicit).is_file():
+        return explicit
+    for d in _walk(phi_root(settings), 2):
+        if (d / fname).is_file():
+            return str(d / fname)
+    return None
+
+
+def download_phi(settings, ctx) -> bool:
+    repo, fname = phi_choice(settings)
+    dest = phi_dir(settings)
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / fname
+    ctx.log(f"Downloading {fname} to {dest}")
+    if out.is_file():
+        ctx.log("  already there")
+        return True
+    if not _fetch(f"{HF}/{repo}/resolve/main/{fname}", out, ctx, fname):
+        return False
+    ctx.log(f"{fname} is ready.")
+    return True
+
+
+def remove(key: str, settings) -> None:
+    """Delete the files this app downloaded for a model; anything else the user keeps in that folder stays."""
+    if key == "phi":
+        dest, files = phi_dir(settings), [phi_choice(settings)[1]]
+    elif key.startswith("florence:"):
+        shutil.rmtree(florence_download_root(settings) / key.split(":", 1)[1], ignore_errors=True)
+        return
+    else:
+        dest = download_dir(key, settings)
+        files = [os.path.basename(f) for f in MODELS[key]["files"]]
+    for name in files:
+        for p in (dest / name, dest / (name + ".part")):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+    try:
+        dest.rmdir()                       # only succeeds when nothing else is in it
+    except OSError:
+        pass
+
+
+def clear_cache(settings) -> None:
+    """Delete the Hugging Face / torch caches — everything the similarity, aesthetic and CLIP models downloaded."""
+    d = Path(paths.resolve(getattr(settings, "hf_cache_dir", "")) or paths.cache_dir())
+    for sub in ("hub", "torch"):
+        shutil.rmtree(d / sub, ignore_errors=True)
 
 
 # ---- Florence 2 (ComfyUI-Florence2 layout) ----
@@ -282,6 +383,8 @@ def find_joycaption(settings) -> dict | None:
 
 def status(key: str, settings) -> str | None:
     """Path of the installed model, or None."""
+    if key == "phi":
+        return find_phi(settings)
     if key.startswith("florence:"):
         path = key.split(":", 1)[1]
         return path if os.path.isdir(path) else None

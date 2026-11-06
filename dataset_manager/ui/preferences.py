@@ -271,6 +271,35 @@ class PreferencesDialog(Adw.PreferencesDialog):
         tag.add(self.florence_note)
         page.add(tag)
 
+        # ---- Phi-4 mini: caption rewriting ----
+        self.phi_group = Adw.PreferencesGroup(
+            title="Phi-4 mini (rewrite captions)",
+            description="A small text model that splits captions into paragraphs or trims repetition. It runs on this "
+                        "computer and never changes a caption by itself — you still press Save Tags in the Tag Editor. "
+                        "Heretic and abliterated are uncensored builds; instruct is Microsoft's original.")
+        self.phi_row = PathRow("Model folder", placeholder=str(models.phi_root(self.state.settings)))
+        self.phi_row.set_text(self.state.settings.phi_path)
+        _apply_row(self.phi_row, self._phi_path_changed)
+        self.phi_group.add(self.phi_row)
+        self._phi_sync = True                 # guard while the combos are being filled
+        self._phi_repos = list(models.PHI_REPOS)
+        self.phi_model = Adw.ComboRow(title="Model")
+        self.phi_model.set_model(Gtk.StringList.new([models.PHI_REPOS[r][0].split(" · ")[-1] for r in self._phi_repos]))
+        self.phi_model.connect("notify::selected", lambda *_a: self._phi_changed())
+        self.phi_group.add(self.phi_model)
+        self.phi_quant = Adw.ComboRow(title="Size")
+        self.phi_quant.set_subtitle("Q8_0 is the most faithful (3.8 GB); Q4_K_M is the smallest (2.3 GB)")
+        self.phi_quant.connect("notify::selected", lambda *_a: self._phi_changed())
+        self.phi_group.add(self.phi_quant)
+        self._phi_sync = False
+        self.phi_note = NoteRow()
+        self.phi_group.add(self.phi_note)
+        self.phi_action = Adw.ActionRow(title="Download", subtitle="From Hugging Face")
+        self.phi_btns = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        self.phi_action.add_suffix(self.phi_btns)
+        self.phi_group.add(self.phi_action)
+        page.add(self.phi_group)
+
         self.dl_group = Adw.PreferencesGroup(title="Downloads", description="From Hugging Face; interrupted downloads resume.")
         page.add(self.dl_group)
         self._dl_rows = []
@@ -292,6 +321,14 @@ class PreferencesDialog(Adw.PreferencesDialog):
                                                  "first collection doesn't stall.")
         other.add(self.cache_row)
         other.add(self.cache_note)
+        self.cache_clear = Adw.ActionRow(
+            title="Cached model downloads",
+            subtitle="Similarity, CLIP and aesthetic models in the cache folder. Removing them frees the space; they "
+                     "download again when next needed.")
+        clear_btn = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER, css_classes=["pill"])
+        clear_btn.connect("clicked", lambda _b: self._clear_cache())
+        self.cache_clear.add_suffix(clear_btn)
+        other.add(self.cache_clear)
         self.prefetch_group = other
         self._prefetch_rows = []
         page.add(other)
@@ -302,6 +339,92 @@ class PreferencesDialog(Adw.PreferencesDialog):
         setattr(self.state.settings, models.MODELS[key]["setting"], row.path())
         self.state.save()
         self._fill_models()
+
+    # ---- Phi-4 mini ----
+    def _phi_path_changed(self) -> None:
+        self.state.settings.phi_path = self.phi_row.path()
+        self.state.save()
+        self._fill_models()
+
+    def _phi_changed(self) -> None:
+        if self._phi_sync:
+            return
+        s = self.state.settings
+        repo = self._phi_repos[self.phi_model.get_selected()]
+        quants = list(models.PHI_REPOS[repo][1])
+        s.phi_repo = repo
+        s.phi_file = models.PHI_REPOS[repo][1][quants[max(0, self.phi_quant.get_selected())]][0]
+        self.state.save()
+        self._fill_phi()
+        self._fill_models()
+
+    def _fill_phi(self, found: str | None = None) -> None:
+        s = self.state.settings
+        repo, fname = models.phi_choice(s)
+        quants = list(models.PHI_REPOS[repo][1])
+        self._phi_sync = True
+        try:
+            self.phi_model.set_selected(self._phi_repos.index(repo))
+            self.phi_quant.set_model(Gtk.StringList.new(quants))
+            self.phi_quant.set_selected(quants.index(fname) if fname in quants else len(quants) - 1)
+        finally:
+            self._phi_sync = False
+        while (child := self.phi_btns.get_first_child()) is not None:
+            self.phi_btns.remove(child)
+        ready = capabilities.has("llama_cpp")
+        label, sizes = models.PHI_REPOS[repo]
+        size = next((s for f, s in sizes.values() if f == fname), "")
+        self.phi_action.set_subtitle(f"{fname} · {size}" if size else fname)
+        if found:
+            self.phi_action.set_title(label)
+            b = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER, css_classes=["pill"])
+            b.connect("clicked", lambda _b: self._remove(model="phi", label=fname))
+            self.phi_btns.append(b)
+        else:
+            self.phi_action.set_title("Download")
+            b = Gtk.Button(label="Download", valign=Gtk.Align.CENTER, css_classes=["pill"])
+            b.connect("clicked", lambda _b: self._download_phi())
+            b.set_sensitive(ready)
+            self.phi_btns.append(b)
+        if not ready:
+            self.phi_note.set_text("Needs llama-cpp-python: Preferences → System.")
+        elif found:
+            self.phi_note.set_text(f"Ready: {found}")
+        else:
+            self.phi_note.set_text(f"Not downloaded in {models.phi_root(s)}.")
+
+    def _download_phi(self) -> None:
+        s = self.state.settings
+        JobDialog(f"Download {models.phi_choice(s)[1]}", str(models.phi_dir(s)),
+                  lambda ctx: models.download_phi(s, ctx), lambda _ok: self._fill_models()).present(self)
+
+    def _remove(self, model: str = "", repo: str = "", label: str = "") -> None:
+        """Delete one downloaded model after a confirm; the model file may be large, so never silent."""
+        def answered(rid):
+            if rid != "remove":
+                return
+            if model:
+                models.remove(model, self.state.settings)
+            elif repo:
+                models.remove("florence:" + repo.rsplit("/", 1)[-1], self.state.settings)
+            from ..core import textllm
+            textllm.unload()
+            self._fill_models()
+        alert(self.get_root(), f"Remove {label or 'this download'}?",
+              "The files are deleted from this computer. You can download them again at any time.",
+              [("cancel", "Cancel"), ("remove", "Remove")], destructive="remove", default="cancel",
+              callback=answered)
+
+    def _clear_cache(self) -> None:
+        def answered(rid):
+            if rid == "remove":
+                models.clear_cache(self.state.settings)
+                self._fill_models()
+        alert(self.get_root(), "Remove the cached model downloads?",
+              f"Deletes the Hugging Face and torch caches in {self.cache_row.path() or paths.cache_dir()}. They "
+              "download again the next time a feature needs them.",
+              [("cancel", "Cancel"), ("remove", "Remove")], destructive="remove", default="cancel",
+              callback=answered)
 
     def _florence_path_changed(self) -> None:
         self.state.settings.florence_path = self.florence_row.path()
@@ -321,6 +444,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             found = {k: models.status(k, s) for k in models.MODELS}
             found["joycaption_path"] = j and (j.get("model") or j.get("path"))
             found["florence"] = models.find_florence_models(s)
+            found["phi"] = models.find_phi(s)
             return found
         self._models_tok = tok = getattr(self, "_models_tok", 0) + 1
         run_background(look, lambda f: self._fill_models_now(f) if tok == self._models_tok else None)
@@ -331,6 +455,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             found = have_all.get("joycaption_path") if key == "joycaption" else have_all.get(key)
             note.set_text(f"Found: {found}" if found else f"Not found in {models.location(key, s)}")
         florence = have_all.get("florence", [])
+        self._fill_phi(have_all.get("phi"))
         self.florence_group.set_description(
             "The same files ComfyUI-Florence2 uses. They are saved into the ComfyUI models/LLM folder "
             f"({models.florence_download_root(self.state.settings)}).")
@@ -350,7 +475,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
             missing = [n for n in needs[key] if not capabilities.has(n)]
             if missing:
                 row.add_suffix(hint("needs " + ", ".join(missing)))
-            row.add_suffix(self._state_suffix(have, lambda k=key: self._download(k)))
+            row.add_suffix(self._state_suffix(have, lambda k=key: self._download(k),
+                                              lambda k=key, n=m["name"]: self._remove(model=k, label=n)))
             self.dl_group.add(row)
             self._dl_rows.append(row)
         for key, (label, mods) in models.PREFETCH.items():
@@ -371,16 +497,24 @@ class PreferencesDialog(Adw.PreferencesDialog):
                                 subtitle=GLib.markup_escape_text(f"{size} · {repo}"))
             if missing:
                 row.add_suffix(hint("needs " + ", ".join(missing)))
-            row.add_suffix(self._state_suffix(have, lambda r=repo: self._download_florence(r)))
+            row.add_suffix(self._state_suffix(have, lambda r=repo: self._download_florence(r),
+                                              lambda r=repo, n=label: self._remove(repo=r, label=n)))
             self.florence_group.add(row)
             self._florence_rows.append(row)
 
     @staticmethod
-    def _state_suffix(done, on_click) -> Gtk.Widget:
+    def _state_suffix(done, on_click, on_remove=None) -> Gtk.Widget:
         if done:
+            box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
             icon = Gtk.Image(icon_name="object-select-symbolic", tooltip_text="Downloaded")
             icon.add_css_class("success")
-            return icon
+            box.append(icon)
+            if on_remove is not None:
+                btn = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER, tooltip_text="Delete these files")
+                btn.add_css_class("pill")
+                btn.connect("clicked", lambda _b: on_remove())
+                box.append(btn)
+            return box
         btn = Gtk.Button(label="Download", valign=Gtk.Align.CENTER)
         btn.add_css_class("pill")
         btn.connect("clicked", lambda _b: on_click())

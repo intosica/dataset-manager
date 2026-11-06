@@ -24,7 +24,7 @@ FEATURES = {
                                  "pip": ["aesthetic-predictor-v2-5"]},
     "einops": {"what": "Auto-tagging: JTP Hydra 3.5", "pip": ["einops", "safetensors", "torch"]},
     "timm": {"what": "Auto-tagging: WD EVA02 large v3", "pip": ["timm", "safetensors", "torch"]},
-    "llama_cpp": {"what": "JoyCaption from .gguf files (llama.cpp, CPU build)",
+    "llama_cpp": {"what": "JoyCaption .gguf files and Phi-4 caption rewriting (llama.cpp, CPU build)",
                   "pip": ["llama-cpp-python"],
                   "extra_index": "https://abetlen.github.io/llama-cpp-python/whl/cpu"},
     "accelerate": {"what": "JoyCaption from Hugging Face weights (GPU)",

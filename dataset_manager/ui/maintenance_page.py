@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from gi.repository import Adw, Gtk
+import os
+
+from gi.repository import Adw, GLib, Gtk
 
 from ..core import capabilities
 from ..core.duplicates import HASH_BITS
 from ..core.organizer import OrganizeOptions, organize_library
+from .duplicate_review import DuplicateReview
 from .widgets import CaptionEditor, ModelPicker, TaskPanel, hint
 
 DIRECTIONS = [("Enlarge and shrink", "both"), ("Enlarge only", "up"), ("Shrink only", "down")]
+DUP_MODES = ["Review the groups first", "Move copies to the Trash automatically"]
 CAPTION_MODES = [("Add where missing", "add"), ("Append missing tags to existing captions", "append"),
                  ("Overwrite all captions", "overwrite")]
 
@@ -35,10 +39,13 @@ class MaintenancePage(Gtk.Box):
         self.state = state
         s = state.settings
 
-        self.g_dup = _step("Remove duplicate images", "Extra copies are moved to the Trash", False)
+        self.g_dup = _step("Remove duplicate images", "Finds look-alike images; copies go to the Trash", False)
         self.dup_thr = _spin("Similarity (0 = exact copies only)", 0, 20, 1, s.duplicate_threshold,
                              f"Differing bits out of {HASH_BITS}; 6 is recommended")
-        self.g_dup.add_row(self.dup_thr)
+        self.dup_mode = Adw.ComboRow(title="Copies", model=Gtk.StringList.new(DUP_MODES),
+                                     subtitle="Reviewing happens after the other steps; you pick what to remove")
+        for w in (self.dup_thr, self.dup_mode):
+            self.g_dup.add_row(w)
 
         self.sort = Adw.SwitchRow(title="Sort into Landscape / Portrait / Square folders", active=True)
         self.rename = Adw.SwitchRow(title="Clean file names", subtitle="lowercase_with_underscores", active=True)
@@ -49,7 +56,7 @@ class MaintenancePage(Gtk.Box):
         for w in (self.sort, self.rename, self.to_jpg):
             g_files.add(w)
 
-        self.g_resize = _step("Resize images", "Scales the whole library", False)
+        self.g_resize = _step("Resize images", "Scales every image in the folder", False)
         self.target = _spin("Longer side (px)", 64, 8192, 64, s.target_dim)
         self.direction = Adw.ComboRow(title="Direction", model=Gtk.StringList.new([d[0] for d in DIRECTIONS]))
         self.direction.set_selected(max(0, [d[1] for d in DIRECTIONS].index(s.scale_direction)
@@ -71,7 +78,7 @@ class MaintenancePage(Gtk.Box):
         self.cap_editor = CaptionEditor()
         self.cap_editor.load(s.caption_spec())
 
-        steps = Adw.PreferencesGroup(title="Steps", description="Run on the whole library. Switched-off steps are skipped.")
+        self.steps = steps = Adw.PreferencesGroup(title="Steps")
         for w in (self.g_dup, self.g_resize, self.g_low, self.g_cap):
             steps.add(w)
 
@@ -87,7 +94,8 @@ class MaintenancePage(Gtk.Box):
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=18, margin_bottom=18,
                           margin_start=12, margin_end=12)
-        for w in (steps, g_files, self.cap_editor):
+        self.review = DuplicateReview(state, self.panel)
+        for w in (steps, self.review, g_files, self.cap_editor):
             content.append(w)
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER,
                                     child=Adw.Clamp(maximum_size=860, child=content))
@@ -103,6 +111,20 @@ class MaintenancePage(Gtk.Box):
         self.cancel_btn.connect("clicked", lambda _b: self.panel.cancel())
         self.panel.on_busy(lambda b: (self.run_btn.set_sensitive(not b), self.cancel_btn.set_sensitive(b)))
         state.settings_changed.connect(self._reload)
+        for sig in (state.library_selected, state.library_changed):
+            sig.connect(lambda *_a: self._update_scope())
+        self._update_scope()
+
+    def scope_dir(self) -> str:
+        """The highlighted collection on the Library page, else the whole library."""
+        sel, lib = self.state.selected_collection, self.state.library
+        return sel if sel and os.path.isdir(sel) and os.path.abspath(sel).startswith(os.path.abspath(lib)) else lib
+
+    def _update_scope(self) -> None:
+        t = self.scope_dir()
+        what = ("the whole library" if t == self.state.library else f"the collection “{os.path.basename(t)}”")
+        self.steps.set_description(f"Runs on {what} (pick another on the Library page). "
+                                   "Switched-off steps are skipped.")
 
     def _reload(self) -> None:
         if not self.panel.busy:
@@ -127,6 +149,18 @@ class MaintenancePage(Gtk.Box):
             target_dim=int(self.target.get_value()), direction=direction, snap_to_64=self.snap.get_active(),
             caption_mode=CAPTION_MODES[self.cap_mode.get_selected()][1] if self.g_cap.get_enable_expansion() else "off",
             caption=spec)
-        base = self.state.library
-        self.panel.run(lambda ctx: organize_library(base, opts, ctx), lambda _r: self.state.content_changed.emit(),
-                       with_trash=True, name="Organizing the library")
+        base, thr = self.scope_dir(), opts.duplicate_threshold
+        review = self.g_dup.get_enable_expansion() and self.dup_mode.get_selected() == 0
+        opts.remove_duplicates = self.g_dup.get_enable_expansion() and not review
+
+        def done(_r):
+            self.state.content_changed.emit()
+            if review:
+                GLib.idle_add(self.review.scan, base, thr)
+        if opts.remove_duplicates or opts.per_image_steps():
+            self.panel.run(lambda ctx: organize_library(base, opts, ctx), done, with_trash=True,
+                           name="Organizing " + os.path.basename(base.rstrip("/")))
+        elif review:
+            self.review.scan(base, thr)
+        else:
+            self.panel.log("No steps selected.")

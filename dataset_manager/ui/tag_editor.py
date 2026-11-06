@@ -11,6 +11,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 from ..core import capabilities, joycaption, models, tagedit, taggers
 from ..core.captions import split_tags
 from ..core.imaging import make_thumbnail
+from .image_menu import attach_image_menu
 from .widgets import NoteRow, TaskPanel, _once, alert, desktop_trash, hint, icon_button, run_background
 
 THUMB = 148
@@ -43,6 +44,8 @@ class TagEditor(Gtk.Box):
     def __init__(self, state):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.state = state
+        self._taggers = list(TAGGERS)
+        self._syncing_taggers = False
         self.folder = ""
         self.captions: dict[str, list[str]] = {}
         self.shown: list[str] = []
@@ -106,7 +109,7 @@ class TagEditor(Gtk.Box):
         side.append(self._tags_group())
         side.append(self._autotag_group())
         side.append(self._joy_group())
-        side_scroll = Gtk.ScrolledWindow(child=Adw.Clamp(child=side, maximum_size=520), hscrollbar_policy=Gtk.PolicyType.NEVER,
+        side_scroll = self.side_scroll = Gtk.ScrolledWindow(child=Adw.Clamp(child=side, maximum_size=520), hscrollbar_policy=Gtk.PolicyType.NEVER,
                                          vexpand=True)
         self.panel = TaskPanel(min_height=90)
         self.panel.on_busy(self._busy)
@@ -165,6 +168,8 @@ class TagEditor(Gtk.Box):
         dbl = Gtk.GestureClick()
         dbl.connect("pressed", lambda _g, n, _x, _y: self._zoom() if n == 2 else None)
         self.preview.add_controller(dbl)
+        attach_image_menu(self.preview, lambda: self.current, self.state,
+                          extras=lambda: [("Move to the Trash", self._trash_selected)])
         self.cap_name = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, css_classes=["dim-label"])
         self.cap_view = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=8, bottom_margin=8,
                                      left_margin=8, right_margin=8, height_request=110)
@@ -186,7 +191,7 @@ class TagEditor(Gtk.Box):
         self.revert_btn.connect("clicked", lambda _b: self._revert_current())
         self.trash_btn = Gtk.Button(icon_name="user-trash-symbolic", tooltip_text="Move the selected images to the Trash")
         self.trash_btn.connect("clicked", lambda _b: self._trash_selected())
-        row = Gtk.Box(spacing=6)
+        self.cap_row = row = Gtk.Box(spacing=6)
         row.append(self.cap_name)
         self.cap_name.set_hexpand(True)
         for b in (self.trash_btn, self.revert_btn, self.save_btn):
@@ -201,26 +206,66 @@ class TagEditor(Gtk.Box):
         return g
 
     def _batch_group(self) -> Gtk.Widget:
+        """Four small tabs (Add · Remove · Replace · Tidy), each with plain-language fields, a live "will change N of M"
+        line and one button that says exactly what it will do. Nothing is written to disk until Save All Tags."""
         self.batch = Adw.PreferencesGroup(title="Batch Edit")
-        self.add_row = Adw.EntryRow(title="Add tags (comma-separated)", show_apply_button=True)
-        self.add_row.connect("apply", lambda _r: self._batch("add"))
-        self.add_first = Adw.SwitchRow(title="Add at the start", active=False)
-        self.remove_row = Adw.EntryRow(title="Remove tags", show_apply_button=True)
-        self.remove_row.connect("apply", lambda _r: self._batch("remove"))
-        self.find_row = Adw.EntryRow(title="Replace tag")
-        self.repl_row = Adw.EntryRow(title="With (empty = remove)", show_apply_button=True)
-        self.repl_row.connect("apply", lambda _r: self._batch("replace"))
-        tools = Gtk.Box(spacing=6, halign=Gtk.Align.END, margin_top=6)
-        for label, op in (("Sort A–Z", "sort"), ("Remove Duplicates", "dedupe")):
-            b = Gtk.Button(label=label)
-            b.connect("clicked", lambda _b, o=op: self._batch(o))
-            tools.append(b)
-        self.undo_btn = Gtk.Button(label="Undo", sensitive=False)
+        self.batch_stack = Gtk.Stack(vhomogeneous=False, interpolate_size=True)
+        self._batch_btns: dict[str, Gtk.Button] = {}
+
+        def tab(name, title, rows, ops, note):
+            lst = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+            for r in rows:
+                lst.append(r)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8)
+            box.append(hint(note))
+            box.append(lst)
+            btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
+            for op, label in ops:
+                b = Gtk.Button(label=label, css_classes=["suggested-action"] if len(ops) == 1 else [])
+                b.connect("clicked", lambda _b, o=op: self._batch(o))
+                self._batch_btns[op] = b
+                btns.append(b)
+            box.append(btns)
+            self.batch_stack.add_titled(box, name, title)
+
+        def entry(title, op):
+            r = Adw.EntryRow(title=title)
+            r.connect("changed", lambda _r: self._batch_preview())
+            r.connect("entry-activated", lambda _r: self._batch(op))
+            return r
+
+        self.add_row = entry("Tags to add (comma-separated)", "add")
+        self.add_pos = _combo("Put them at", ["The end of each caption", "The start of each caption"])
+        self.add_pos.connect("notify::selected", lambda *_a: self._batch_preview())
+        tab("add", "Add", [self.add_row, self.add_pos], [("add", "Add")],
+            "Adds tags to every image that doesn't already have them.")
+        self.remove_row = entry("Tags to remove (comma-separated)", "remove")
+        tab("remove", "Remove", [self.remove_row], [("remove", "Remove")],
+            "Removes these tags from every image. Wildcards work: long* · *hair*. You can also use the − next to a tag "
+            "in the Tags list below.")
+        self.find_row = entry("Find", "replace")
+        self.repl_row = entry("Replace with (leave empty to remove)", "replace")
+        self.repl_mode = _combo("Find it in", ["Whole tags", "Any part of a tag"])
+        self.repl_mode.connect("notify::selected", lambda *_a: self._batch_preview())
+        tab("replace", "Replace", [self.find_row, self.repl_row, self.repl_mode], [("replace", "Replace")],
+            "Whole tags: “long hair” → “short hair” only matches that exact tag. Any part: “hair” → “locks” also "
+            "changes “long hair” into “long locks”.")
+        self.keep_row = Adw.SpinRow.new_with_range(1, 500, 1)
+        self.keep_row.set_title("Keep only the first … tags")
+        self.keep_row.set_value(75)
+        tab("tidy", "Tidy", [self.keep_row],
+            [("sort", "Sort A–Z"), ("dedupe", "Remove Duplicates"), ("truncate", "Keep First Tags")],
+            "Sort every caption alphabetically, drop repeated tags, or cut captions down to their first tags "
+            "(useful for trainers with a token limit).")
+        switcher = Gtk.StackSwitcher(stack=self.batch_stack, halign=Gtk.Align.CENTER)
+        self.batch_stack.connect("notify::visible-child-name", lambda *_a: self._batch_preview())
+        self.batch_preview = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"], margin_top=6)
+        self.undo_btn = Gtk.Button(label="Undo Last Batch Edit", sensitive=False, halign=Gtk.Align.END)
         self.undo_btn.connect("clicked", lambda _b: self._undo_batch())
-        tools.append(self.undo_btn)
-        for w in (self.add_row, self.add_first, self.remove_row, self.find_row, self.repl_row):
-            self.batch.add(w)
-        self.batch.add(tools)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for w in (switcher, self.batch_stack, self.batch_preview, self.undo_btn):
+            box.append(w)
+        self.batch.add(box)
         return self.batch
 
     def _tags_group(self) -> Gtk.Widget:
@@ -239,7 +284,7 @@ class TagEditor(Gtk.Box):
     def _autotag_group(self) -> Gtk.Widget:
         s = self.state.settings
         g = Adw.PreferencesGroup(title="Auto-tag")
-        self.tagger = _combo("Tagger", [l for _k, l in TAGGERS], _index(TAGGERS, s.tagger))
+        self.tagger = _combo("Tagger", [l for _k, l in self._taggers], _index(self._taggers, s.tagger))
         self.tagger.connect("notify::selected", lambda *_a: (self._save_opts(), self._model_status()))
         self.threshold = Adw.SpinRow.new_with_range(0, 0.95, 0.05)
         self.threshold.set_title("Threshold")
@@ -247,12 +292,17 @@ class TagEditor(Gtk.Box):
         self.threshold.set_digits(2)
         self.threshold.set_value(s.tag_threshold)
         self.threshold.connect("notify::value", lambda *_a: self._save_opts())
+        self.florence_task = _combo("Florence task", [l for _k, _p, l in taggers.FLORENCE_TASKS],
+                                    _index([(k, l) for k, _p, l in taggers.FLORENCE_TASKS], s.florence_task))
+        self.florence_task.connect("notify::selected", lambda *_a: self._save_opts())
+        self.florence_task.set_visible(s.tagger.startswith("florence:"))
+        self.threshold.set_visible(not s.tagger.startswith("florence:"))
         self.tag_mode = _combo("Existing captions", [l for _k, l in TAG_MODES])
         self.tag_note = NoteRow()
         self.tag_btn = Gtk.Button(label="Tag Images", css_classes=["suggested-action", "pill"], halign=Gtk.Align.END,
                                   margin_top=6)
         self.tag_btn.connect("clicked", lambda _b: self._autotag())
-        for w in (self.tagger, self.threshold, self.tag_mode, self.tag_note):
+        for w in (self.tagger, self.threshold, self.florence_task, self.tag_mode, self.tag_note):
             g.add(w)
         g.add(self.tag_btn)
         return g
@@ -319,6 +369,15 @@ class TagEditor(Gtk.Box):
         ov = Gtk.Overlay(child=pic)
         ov.add_overlay(badge)
         li.set_child(ov)
+
+        def select_it():                                   # right-click an unselected image → select just that one
+            if not self.sel.is_selected(li.get_position()):
+                self.sel.select_item(li.get_position(), True)
+
+        def delete_item():
+            n = len(self.selected())
+            return [(f"Move {n} Images to the Trash" if n > 1 else "Move to the Trash", self._trash_selected)]
+        attach_image_menu(ov, lambda: getattr(pic, "path", None), self.state, extras=delete_item, before=select_it)
 
     def _bind_cell(self, _f, li) -> None:
         item, ov = li.get_item(), li.get_child()
@@ -484,6 +543,7 @@ class TagEditor(Gtk.Box):
         n = len(self.targets())
         what = f"{len(sel):,} selected images" if sel else f"all {n:,} shown images"
         self.batch.set_description(f"Applies to {what}.")
+        self._batch_preview()
         busy = self.panel.busy
         self.tag_btn.set_label(f"Tag {n:,} Images" if n != 1 else "Tag 1 Image")
         self.joy_btn.set_label(f"Caption {n:,} Images" if n != 1 else "Caption 1 Image")
@@ -652,32 +712,61 @@ class TagEditor(Gtk.Box):
         for path, ov in list(self._cells.items()):
             self._update_cell(path, ov)
 
-    def _batch(self, op: str) -> None:
-        self.save_current()
-        files = self.targets()
-        if not files:
-            return
+    def _batch_fn(self, op: str):
+        """The caption edit for one operation, or None when its fields are empty."""
         if op == "add":
             new = split_tags(self.add_row.get_text())
-            fn = lambda t: tagedit.add(t, new, self.add_first.get_active())
-        elif op == "remove":
+            at_start = self.add_pos.get_selected() == 1
+            return (lambda t: tagedit.add(t, new, at_start)) if new else None
+        if op == "remove":
             drop = split_tags(self.remove_row.get_text())
-            fn = lambda t: tagedit.remove(t, drop)
-        elif op == "replace":
+            return (lambda t: tagedit.remove(t, drop)) if drop else None
+        if op == "replace":
             find, repl = self.find_row.get_text().strip(), self.repl_row.get_text()
             if not find:
-                return
-            fn = lambda t: tagedit.replace(t, find, repl)
-        elif op == "sort":
-            fn = lambda t: sorted(t, key=str.lower)
-        else:
-            fn = lambda t: split_tags(", ".join(t))
-        changed = {}
-        for p in files:
+                return None
+            if self.repl_mode.get_selected() == 1:
+                return lambda t: tagedit.replace_text(t, find, repl)
+            return lambda t: tagedit.replace(t, find, repl)
+        if op == "sort":
+            return lambda t: sorted(t, key=str.lower)
+        if op == "truncate":
+            n = int(self.keep_row.get_value())
+            return lambda t: tagedit.keep_first(t, n)
+        return lambda t: split_tags(", ".join(t))          # dedupe
+
+    def _batch_changes(self, op: str) -> dict[str, list[str]]:
+        fn = self._batch_fn(op)
+        out = {}
+        for p in (self.targets() if fn else []):
             old = self.captions.get(p, [])
-            nt = fn(old)
-            if nt != old:
-                changed[p] = nt
+            new = fn(old)
+            if new != old:
+                out[p] = new
+        return out
+
+    def _batch_preview(self) -> None:
+        """Live "Will change X of N captions" for the visible tab, and button labels with the image count."""
+        n = len(self.targets())
+        word = f"{n:,} image{'s' if n != 1 else ''}"
+        for op, label in (("add", "Add to"), ("remove", "Remove from"), ("replace", "Replace in")):
+            self._batch_btns[op].set_label(f"{label} {word}")
+            self._batch_btns[op].set_sensitive(n > 0 and self._batch_fn(op) is not None and not self.panel.busy)
+        for op in ("sort", "dedupe", "truncate"):
+            self._batch_btns[op].set_sensitive(n > 0 and not self.panel.busy)
+        op = self.batch_stack.get_visible_child_name()
+        if op == "tidy" or n > 20000:
+            self.batch_preview.set_text("")
+        elif self._batch_fn(op) is None:
+            self.batch_preview.set_text("Fill in the field above to see what will change.")
+        else:
+            c = len(self._batch_changes(op))
+            self.batch_preview.set_text(f"Will change {c:,} of {n:,} captions." if c else
+                                        f"Nothing to change in these {n:,} captions.")
+
+    def _batch(self, op: str) -> None:
+        self.save_current()
+        changed = self._batch_changes(op)
         if not changed:
             self._toast("Nothing to change.")
             return
@@ -686,9 +775,10 @@ class TagEditor(Gtk.Box):
         self.undo_btn.set_sensitive(True)
         self._show_caption()
         self._toast(f"Changed {n:,} captions · press Save All Tags to write them.")
-        for row in (self.add_row, self.remove_row):
-            if (op == "add" and row is self.add_row) or (op == "remove" and row is self.remove_row):
-                row.set_text("")
+        row = {"add": self.add_row, "remove": self.remove_row}.get(op)
+        if row:
+            row.set_text("")
+        self._batch_preview()
 
     def _undo_batch(self) -> None:
         self.save_current()
@@ -758,9 +848,12 @@ class TagEditor(Gtk.Box):
 
     # ================= AI =================
     def _save_opts(self) -> None:
+        if self._syncing_taggers:
+            return
         s = self.state.settings
-        s.tagger = TAGGERS[self.tagger.get_selected()][0]
+        s.tagger = self._taggers[self.tagger.get_selected()][0]
         s.tag_threshold = round(self.threshold.get_value(), 2)
+        s.florence_task = taggers.FLORENCE_TASKS[self.florence_task.get_selected()][0]
         s.joy_caption_type = list(joycaption.CAPTION_TYPE_MAP)[self.joy_type.get_selected()]
         s.joy_caption_length = joycaption.LENGTHS[self.joy_len.get_selected()]
         s.joy_name = self.joy_name.get_text().strip()
@@ -783,23 +876,57 @@ class TagEditor(Gtk.Box):
         self.joy_prompt.set_subtitle(GLib.markup_escape_text(joycaption.prompt_for(self.state.settings)))
 
     def _model_status(self, *_a) -> None:
+        if self._syncing_taggers:
+            return
         # model lookups walk folders (slow on USB disks / big HF caches): do them off the main thread
         s, key = self.state.settings, self.state.settings.tagger
         self._status_tok = tok = getattr(self, "_status_tok", 0) + 1
-        run_background(lambda: (tok, key, models.status(key, s), models.find_joycaption(s)), self._show_status)
+        run_background(lambda: (tok, key, models.status(key, s), models.find_florence_models(s),
+                                models.find_joycaption(s)), self._show_status)
+
+    def _sync_taggers(self, florence: list) -> None:
+        pairs = list(TAGGERS) + [
+            (f"florence:{m.path}", f"Florence-2 · {m.name.removeprefix('Florence-2 ')}") for m in florence
+        ]
+        selected = self.state.settings.tagger
+        if selected not in [k for k, _l in pairs] and selected.startswith("florence:"):
+            pairs.append((selected, f"Florence-2 · {os.path.basename(selected)} (not found)"))
+        if pairs == self._taggers:
+            return
+        self._taggers = pairs
+        self._syncing_taggers = True
+        try:
+            self.tagger.set_model(Gtk.StringList.new([l for _k, l in pairs]))
+            self.tagger.set_selected(_index(pairs, selected))
+            self.florence_task.set_selected(_index(
+                [(k, l) for k, _p, l in taggers.FLORENCE_TASKS], self.state.settings.florence_task))
+        finally:
+            self._syncing_taggers = False
 
     def _show_status(self, r) -> None:
-        tok, key, found, j = r
+        tok, key, found, florence, j = r
         if tok != self._status_tok:
             return
+        self._sync_taggers(florence)
         s = self.state.settings
-        need = ["torch", "einops", "safetensors"] if key == "hydra" else ["torch", "timm", "safetensors"]
+        is_florence = key.startswith("florence:")
+        self.florence_task.set_visible(is_florence)
+        self.threshold.set_visible(not is_florence)
+        if is_florence:
+            need = ["torch", "transformers", "timm", "einops", "safetensors"]
+        else:
+            need = ["torch", "einops", "safetensors"] if key == "hydra" else ["torch", "timm", "safetensors"]
         missing = [m for m in need if not capabilities.has(m)]
         if missing:
             self.tag_note.set_text("Needs " + ", ".join(missing) + ": Preferences → System.")
+        elif is_florence and not taggers.florence_transformers_ok(capabilities.version("transformers")):
+            self.tag_note.set_text(
+                "Florence needs transformers 4.38–4.46; run: pip install 'transformers>=4.38,<4.47'."
+            )
         elif not found:
-            self.tag_note.set_text(f"Model not found in {models.location(key, s)}. Set its folder or download it "
-                                   "in Preferences → Models.")
+            where = (key.split(":", 1)[1] if is_florence else models.location(key, s))
+            self.tag_note.set_text(f"Model not found in {where}. Set its folder or download it in Preferences → "
+                                   "Models.")
         else:
             self.tag_note.set_text(f"Model: {found}")
         if not j:

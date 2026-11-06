@@ -13,9 +13,10 @@ FEATURES = {
     "bs4": {"what": "ArtofMTG source (HTML parsing)", "pip": ["beautifulsoup4"]},
     "torch": {"what": "AI upscaling, GPU support", "pip": ["torch"]},
     "spandrel": {"what": "AI upscaling models", "pip": ["spandrel"]},
-    "transformers": {"what": "Low-quality detection, TinyCLIP similarity", "pip": ["transformers"]},
+    "transformers": {"what": "Low-quality detection, TinyCLIP similarity, Florence-2",
+                   "pip": ["transformers>=4.38,<4.47"]},
     "onnxruntime": {"what": "Similarity filter: imgbeddings backend",
-                    "pip": ["onnxruntime", "transformers"]},
+                    "pip": ["onnxruntime", "transformers>=4.38,<4.47"]},
     "imageprism": {"what": "Similarity filter: imageprism backends", "pip": ["imageprism"]},
     "open_clip": {"what": "Similarity filter: OpenCLIP backend", "pip": ["open_clip_torch"]},
     "torchvision": {"what": "Similarity filter: MobileNet backend", "pip": ["torchvision"]},
@@ -27,7 +28,7 @@ FEATURES = {
                   "pip": ["llama-cpp-python"],
                   "extra_index": "https://abetlen.github.io/llama-cpp-python/whl/cpu"},
     "accelerate": {"what": "JoyCaption from Hugging Face weights (GPU)",
-                   "pip": ["accelerate", "transformers", "torch"]},
+                   "pip": ["accelerate", "transformers>=4.38,<4.47", "torch"]},
     "bitsandbytes": {"what": "JoyCaption 4-bit mode (fits 8–12 GB GPUs)", "pip": ["bitsandbytes"]},
 }
 
@@ -49,6 +50,14 @@ def has(module: str) -> bool:
         except (ImportError, ValueError):
             _found[module] = False
     return _found[module]
+
+
+def version(module: str) -> str:
+    try:
+        from importlib.metadata import version as _v
+        return _v(module)
+    except Exception:
+        return ""
 
 
 def report() -> list[dict]:

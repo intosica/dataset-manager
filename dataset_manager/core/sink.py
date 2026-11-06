@@ -78,13 +78,16 @@ class ImageSink:
         return stem in self.stems
 
     # ---- ingest ----
-    def ingest(self, data: bytes, name: str) -> str:
-        """Returns: saved | exists | duplicate | small | rejected | invalid"""
-        status = self._ingest(data, name)
+    def ingest(self, data: bytes, name: str, caption: str | None = None) -> str:
+        """Returns: saved | exists | duplicate | small | rejected | invalid.
+
+        `caption` overrides the template caption (imageboards pass their tags here).
+        """
+        status = self._ingest(data, name, caption)
         self.counts[status] += 1
         return status
 
-    def _ingest(self, data: bytes, name: str) -> str:
+    def _ingest(self, data: bytes, name: str, caption: str | None = None) -> str:
         if name in self.stems:
             return "exists"
         try:
@@ -110,10 +113,10 @@ class ImageSink:
             os.makedirs(folder, exist_ok=True)
             save_image(img, os.path.join(folder, f"{name}.jpg"))
             if self.opts.write_captions:
-                caption = render_caption(self.opts.caption, self.series_tag, fld)
-                if caption:
+                text = caption if caption is not None else render_caption(self.opts.caption, self.series_tag, fld)
+                if text:
                     with open(os.path.join(folder, f"{name}.txt"), "w", encoding="utf-8") as f:
-                        f.write(caption)
+                        f.write(text)
             if self.guard:
                 self.guard.add(rec)
             self.stems.add(name)

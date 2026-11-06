@@ -26,8 +26,28 @@ _BING_COLORS = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "p
 _LICENSES = ["All Creative Commons", "Public domain", "Free to share and use", "Free to share and use commercially",
              "Free to modify, share and use", "Free to modify, share and use commercially"]
 
+def _plain(param: str, names) -> list:
+    return [(n, f"{param}={n}", None) for n in names]
+
+
+# YGOPRODeck's filter funnel (card type, attribute, monster type, level, format). Ticked options of one group are OR'ed.
+_YGO = [
+    ("type", "Card type", _plain("type", ["Normal Monster", "Effect Monster", "Ritual Monster", "Fusion Monster",
+                                          "Synchro Monster", "XYZ Monster", "Link Monster", "Pendulum Effect Monster",
+                                          "Spell Card", "Trap Card"])),
+    ("attribute", "Attribute", _plain("attribute", ["DARK", "LIGHT", "EARTH", "WATER", "FIRE", "WIND", "DIVINE"])),
+    ("race", "Monster type / Spell & Trap type", _plain("race", [
+        "Dragon", "Spellcaster", "Warrior", "Fiend", "Zombie", "Machine", "Aqua", "Pyro", "Beast", "Beast-Warrior",
+        "Winged Beast", "Fairy", "Insect", "Dinosaur", "Reptile", "Fish", "Sea Serpent", "Rock", "Plant", "Thunder",
+        "Psychic", "Wyrm", "Cyberse", "Divine-Beast", "Illusion", "Quick-Play", "Continuous", "Equip", "Field",
+        "Counter", "Normal", "Ritual"])),
+    ("level", "Level / Rank", [(str(n), f"level={n}", None) for n in range(1, 13)]),
+    ("banlist", "Format", [("TCG", "banlist=TCG", None), ("OCG", "banlist=OCG", None), ("Goat", "banlist=Goat", None)]),
+]
+
 # engine -> [(group key, group label, [options])]
 FILTERS: dict[str, list] = {
+    "ygoprodeck": _YGO,
     "Bing": [
         ("size", "Image size", [("Small", "filterui:imagesize-small", None), ("Medium", "filterui:imagesize-medium", None),
                                 ("Large", "filterui:imagesize-large", None), ("Extra large", "filterui:imagesize-wallpaper", None)]),

@@ -100,6 +100,8 @@ class FilterPanel(Adw.PreferencesGroup):
             n *= len(vals)
         if not FILTERS.get(self.engine):
             self.set_description("")
+        elif self.engine == "ygoprodeck":
+            self.set_description("Options ticked in the same group are OR'ed; different groups are AND'ed.")
         elif not self.selection():
             self.set_description("Nothing selected: plain search. Tick several options per filter to rotate through them.")
         elif n == 1:

@@ -63,7 +63,7 @@ def collection_dirs(base: str) -> list[tuple[str, str]]:
     """[(path, tag)] — treats `base` itself as one collection if it already looks like one."""
     names = list_collections(base)
     loose = any(f.lower().endswith(IMAGE_EXTS) for f in os.listdir(base))
-    if loose or (names and all(n in ORIENTATION_DIRS for n in names)):
+    if loose or (names and all(n in ORIENTATION_DIRS or n.lower() in LOW_QUALITY_DIRS for n in names)):
         return [(base, clean_tag(os.path.basename(base.rstrip("/"))) or "collection")]
     return [(os.path.join(base, n), clean_tag(n)) for n in names]
 

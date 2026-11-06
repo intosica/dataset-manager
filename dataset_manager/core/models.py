@@ -6,7 +6,9 @@ chosen folder, so pointing a setting at an existing folder (e.g. another tool's 
 from __future__ import annotations
 
 import glob
+import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
@@ -32,6 +34,159 @@ MODELS = {
                                 "tokenizer.json", "tokenizer_config.json", "model.safetensors.index.json"]
                                + [f"model-0000{i}-of-00004.safetensors" for i in range(1, 5)]},
 }
+
+
+# ---- Florence 2 (ComfyUI-Florence2 layout) ----
+# ComfyUI's Florence2 node downloads these repos into models/LLM/<repo basename>. The app reads that folder
+# instead of keeping a second copy. Order here is the order shown in Preferences.
+FLORENCE_REPOS = {
+    "Florence-2-base": ("microsoft/Florence-2-base", "Florence-2 Base", "0.5 GB"),
+    "Florence-2-base-ft": ("microsoft/Florence-2-base-ft", "Florence-2 Base FT", "0.5 GB"),
+    "Florence-2-large": ("microsoft/Florence-2-large", "Florence-2 Large", "1.5 GB"),
+    "Florence-2-large-ft": ("microsoft/Florence-2-large-ft", "Florence-2 Large FT", "1.5 GB"),
+    "CogFlorence-2.1-Large": ("thwri/CogFlorence-2.1-Large", "CogFlorence 2.1 Large", "1.6 GB"),
+    "CogFlorence-2.2-Large": ("thwri/CogFlorence-2.2-Large", "CogFlorence 2.2 Large", "1.6 GB"),
+    "Florence-2-Flux-Large": ("gokaygokay/Florence-2-Flux-Large", "Florence-2 Flux Large", "3.1 GB"),
+    "Florence-2-SD3-Captioner": ("gokaygokay/Florence-2-SD3-Captioner", "Florence-2 SD3 Captioner", "1.5 GB"),
+    "Florence-2-base-PromptGen-v1.5": ("MiaoshouAI/Florence-2-base-PromptGen-v1.5", "Florence-2 Base PromptGen 1.5", "0.5 GB"),
+    "Florence-2-large-PromptGen-v1.5": ("MiaoshouAI/Florence-2-large-PromptGen-v1.5", "Florence-2 Large PromptGen 1.5", "1.5 GB"),
+    "Florence-2-base-PromptGen-v2.0": ("MiaoshouAI/Florence-2-base-PromptGen-v2.0", "Florence-2 Base PromptGen 2.0", "0.5 GB"),
+    "Florence-2-large-PromptGen-v2.0": ("MiaoshouAI/Florence-2-large-PromptGen-v2.0", "Florence-2 Large PromptGen 2.0", "1.5 GB"),
+    "Florence-2-DocVQA": ("HuggingFaceM4/Florence-2-DocVQA", "Florence-2 DocVQA", "1.5 GB"),
+    "Florence-2-base-Castollux-v0.5": ("PJMixers-Images/Florence-2-base-Castollux-v0.5", "Florence-2 Base Castollux 0.5", "0.5 GB"),
+}
+FLORENCE_FILES = ["*.json", "*.py", "*.txt", "*.model", "*.tiktoken", "*.spm", "*.merges", "*.vocab", "*.jinja"]
+
+
+@dataclass(frozen=True)
+class FlorenceModel:
+    name: str
+    path: str
+    repo: str = ""
+    size: str = ""
+
+
+def _florence_info(d: Path) -> tuple[str, str, str]:
+    """(display name, repo, size) for a folder or a HF cache snapshot."""
+    name = d.name
+    repo = ""
+    if d.parent.name == "snapshots" and d.parent.parent.name.startswith("models--"):
+        # ~/.cache/huggingface/hub/models--microsoft--Florence-2-base/snapshots/<sha>
+        repo = d.parent.parent.name.removeprefix("models--").replace("--", "/")
+        name = repo.rsplit("/", 1)[-1]
+    info = FLORENCE_REPOS.get(name)
+    if info:
+        return info[1], info[0], info[2]
+    return name.replace("-", " "), repo, ""
+
+
+def _is_florence(d: Path) -> bool:
+    try:
+        cfg = json.loads((d / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not (d / "preprocessor_config.json").is_file() or not (d / "modeling_florence2.py").is_file():
+        return False
+    weights = (list(d.glob("*.safetensors")) or list(d.glob("pytorch_model*.bin")))
+    if not weights:
+        return False
+    return "florence" in str(cfg.get("architectures", "")).lower() or "florence" in str(cfg.get("model_type", "")).lower()         or "florence" in str(cfg.get("_name_or_path", "")).lower()
+
+
+def _comfyui_llm_dirs(settings) -> list[Path]:
+    """ComfyUI's models/LLM folders, from an explicit folder, the model folder list, or the usual install paths."""
+    explicit = paths.resolve(getattr(settings, "florence_path", ""))
+    if explicit:
+        p = Path(explicit)
+        if p.name.lower() == "models":
+            return [p / "LLM"]
+        if (p / "models" / "LLM").is_dir():
+            return [p / "models" / "LLM"]
+        return [p]
+    out: list[Path] = []
+    for d in getattr(settings, "model_dirs", []) or []:
+        p = Path(paths.resolve(d))
+        for parent in (p, *p.parents):
+            if (parent / "models" / "LLM").is_dir() and parent / "models" / "LLM" not in out:
+                out.append(parent / "models" / "LLM")
+                break
+    home = Path.home()
+    for base in (home / "Documents", home, Path("/opt"), Path("/usr/local")):
+        for p in (base / "ComfyUI", base / "comfyui"):
+            llm = p / "models" / "LLM"
+            if llm.is_dir() and llm not in out:
+                out.append(llm)
+        try:
+            for p in base.iterdir():
+                llm = p / "models" / "LLM"
+                if p.is_dir() and p.name.lower().startswith("comfyui") and llm.is_dir() and llm not in out:
+                    out.append(llm)
+        except OSError:
+            pass
+    local = paths.data_dir() / "models" / "florence"
+    if local.is_dir():
+        out.append(local)
+    return out
+
+
+def find_florence_models(settings) -> list[FlorenceModel]:
+    """Florence-2 folders in ComfyUI's models/LLM (and the HF cache); first copy of each name wins."""
+    roots = _comfyui_llm_dirs(settings)
+    for hub in _hf_cache_roots():
+        try:
+            roots += [p for p in hub.iterdir() if p.is_dir() and "florence" in p.name.lower()]
+        except OSError:
+            pass
+    found: dict[str, FlorenceModel] = {}
+    for root in roots:
+        candidates = [root]
+        if root.name.startswith("models--"):
+            candidates = list((root / "snapshots").glob("*")) if (root / "snapshots").is_dir() else []
+        else:
+            try:
+                candidates += [p for p in root.iterdir() if p.is_dir()]
+            except OSError:
+                pass
+        for d in candidates:
+            if d.name.startswith(".") or not _is_florence(d):
+                continue
+            name, repo, size = _florence_info(d)
+            found.setdefault(name.lower(), FlorenceModel(name, str(d), repo, size))
+    order = {v[1].lower(): i for i, v in enumerate(FLORENCE_REPOS.values())}
+    return sorted(found.values(), key=lambda m: (order.get(m.name.lower(), 999), m.name.lower()))
+
+
+def florence_download_root(settings) -> Path:
+    p = paths.resolve(getattr(settings, "florence_path", ""))
+    if p:
+        root = Path(p)
+        if _is_florence(root):
+            return root.parent
+        dirs = _comfyui_llm_dirs(settings)
+        return dirs[0] if dirs else root
+    dirs = _comfyui_llm_dirs(settings)
+    if dirs:
+        return dirs[0]
+    return paths.data_dir() / "models" / "florence"
+
+
+def download_florence(repo: str, settings, ctx) -> bool:
+    """Fetch one Florence-2 repo into models/LLM/<repo name>, the same layout ComfyUI uses."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError("Florence downloads need huggingface-hub; install 'transformers' in Preferences → "
+                           "System first.") from exc
+    dest = florence_download_root(settings) / repo.rsplit("/", 1)[-1]
+    dest.mkdir(parents=True, exist_ok=True)
+    ctx.log(f"Downloading {repo} to {dest}… (Hugging Face shows progress in its own terminal)")
+    # Prefer safetensors; fall back to .bin for the few repos that only ship that.
+    for extra in (["*.safetensors"], ["*.bin"]):
+        snapshot_download(repo_id=repo, local_dir=str(dest), allow_patterns=FLORENCE_FILES + extra)
+        if list(dest.glob("*.safetensors")) or list(dest.glob("pytorch_model*.bin")):
+            break
+    ctx.log(f"{repo} is ready.")
+    return True
 
 
 # ---- locations ----
@@ -127,6 +282,9 @@ def find_joycaption(settings) -> dict | None:
 
 def status(key: str, settings) -> str | None:
     """Path of the installed model, or None."""
+    if key.startswith("florence:"):
+        path = key.split(":", 1)[1]
+        return path if os.path.isdir(path) else None
     if key == "hydra":
         return find_hydra(settings)
     if key == "wd":

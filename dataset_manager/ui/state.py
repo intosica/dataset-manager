@@ -29,6 +29,7 @@ class AppState:
         self.library_changed = Signal()    # a different library folder was chosen
         self.content_changed = Signal()    # files in the library were added / moved / removed
         self.library_selected = Signal()   # a collection row was picked on the Library page
+        self.open_in_tool = Signal()       # ("scorer" | "quick", image path): right-click → open in a Tag Tools tool
         self.selected_collection = ""
         self._runtime = None
         self._saved = dataclasses.asdict(self.settings)

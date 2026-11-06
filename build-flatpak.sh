@@ -15,7 +15,7 @@ APP_ID=io.github.intosica.DatasetManager
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # several GB of build cache: kept on the home drive, override with FLATPAK_BUILD_DIR
 BUILD="${FLATPAK_BUILD_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/dataset-manager-flatpak}"
-EXTRAS="imageprism onnxruntime transformers"
+EXTRAS="imageprism onnxruntime transformers>=4.38,<4.47"
 BUNDLE=0
 
 while [[ $# -gt 0 ]]; do

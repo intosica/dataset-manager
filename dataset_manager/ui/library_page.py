@@ -4,11 +4,13 @@ import os
 
 from gi.repository import Adw, Gdk, GLib, Gtk
 
+from ..core import tagedit
 from ..core.imaging import make_thumbnails
 from ..core.library import SORTS, library_stats, preview_files
 from ..core.upscaler import get_upscaler, upscale_folder
 from ..core.utils import fmt_bytes
-from .widgets import TaskPanel, alert, hint, icon_button, open_path, run_background
+from .image_menu import attach_image_menu
+from .widgets import TaskPanel, alert, desktop_trash, hint, icon_button, open_path, run_background
 
 VIEWS = ["All", "Landscape", "Portrait", "Square", "Low quality"]
 
@@ -214,4 +216,21 @@ class LibraryPage(Gtk.Box):
             pic.set_tooltip_text(os.path.basename(f))
             child = Gtk.FlowBoxChild(child=pic)
             child.file_path = f
+            attach_image_menu(child, lambda c=child: c.file_path, self.state,
+                              extras=lambda c=child: [("Move to the Trash", lambda: self._delete(c))])
             self.grid.append(child)
+
+    def _delete(self, child) -> None:
+        path = child.file_path
+
+        def answered(rid):
+            if rid != "trash" or not desktop_trash(path):
+                return
+            sc = tagedit.sidecar(path)
+            if os.path.exists(sc):
+                desktop_trash(sc)
+            self.grid.remove(child)
+            self.state.content_changed.emit()
+        alert(self.get_root(), "Move this image to the Trash?", f"{os.path.basename(path)} and its caption file.",
+              [("cancel", "Cancel"), ("trash", "Move to Trash")], destructive="trash", default="cancel",
+              callback=answered)

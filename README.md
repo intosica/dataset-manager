@@ -40,21 +40,38 @@ The flatpak can read and write your home folder, `/media`, `/run/media` and `/mn
 
 ## Layout
 
-The pages are in the header bar (Ctrl+1 … Ctrl+5); the left sidebar holds your **sessions**.
+The pages are in the header bar (Ctrl+1 … Ctrl+4); the left sidebar holds your **sessions**.
 
 | Page | What it does |
 |---|---|
-| Collect | Image search (Bing, DuckDuckGo, Yahoo, Yandex, Pinterest, Internet Archive) and card-art galleries (ArtofMTG, MTG Nexus) |
-| Library | Per-collection statistics and thumbnail previews |
-| Duplicates | Exact + near-duplicate finder; review groups, then move to Trash or delete |
-| Maintenance | Optional steps: dedupe, sort, rename, JPEG, resize, low-quality flagging, captions |
-| Tag Tools | **Tag Editor**: browse a dataset, filter by tags, edit captions one by one or in batches (save one image or all of them; double-click the preview for a closer look), auto-tag (JTP Hydra 3.5, WD EVA02 Large v3) and caption with JoyCaption. **Imageboard Upload Helper**: turns tag lists into imageboard upload format |
+| Collect | Image search (Bing, DuckDuckGo, Yahoo, Yandex, Pinterest, Internet Archive), imageboards with an in-app viewer (Danbooru, Gelbooru; Rule34.xxx after you switch on **Mature content** in Preferences), YGOPRODeck card art and card-art galleries (ArtofMTG, MTG Nexus) |
+| Library | Per-collection statistics and thumbnail previews; right-click a preview to move it to the Trash |
+| Maintenance | Optional steps for the **highlighted collection** (or the whole library if none is picked): dedupe (review the groups first, or trash copies automatically), sort, rename, JPEG, resize, low-quality flagging, captions |
+| Tag Tools | **Tag Editor**: browse a dataset, filter by tags, edit captions one by one or in batches (save one image or all of them; double-click the preview for a closer look), auto-tag (JTP Hydra 3.5, WD EVA02 Large v3) and caption with JoyCaption. Batch Edit has Add / Remove / Replace / Tidy tabs with a live “will change N captions” line and Undo. **Imageboard Upload Helper**: turns tag lists into imageboard upload format. **Aesthetic Scorer**: click or drop any image to score it. **Quick Caption**: a throw-away one-image Tag Editor (tagging and captioning, nothing is saved) |
+
+Right-click any image in the app to move it to the Trash (Library, Tag Editor), or to open it in the **Aesthetic Scorer** or **Quick Caption**.
 
 The window adapts to narrow sizes: the sidebar collapses and the page switcher moves to the bottom.
 
 | Tag Tools → Tag Editor | Collect |
 |---|---|
 | <img src="docs/screenshots/tag-editor.png" alt="Tag Editor: image grid, editable caption, batch tag edit" width="430"> | <img src="docs/screenshots/collect.png" alt="Collect page: source, search terms and filters" width="430"> |
+
+### Imageboards, YGOPRODeck and the new tools
+
+Imageboard searches run in a hidden browser (no window appears, whatever “Run the browser without a window” says).
+Videos and animated GIFs are left out. Danbooru only lets anonymous users search two tags, so the first two go to the
+server and the rest are applied locally; Gelbooru's practical limit is about 11 tags. The app shows a notice when
+either happens. Danbooru also sits behind an interactive Cloudflare check that a hidden browser cannot pass, so the
+app tells you so and suggests Gelbooru.
+
+| Gelbooru: “cat” | YGOPRODeck: archetype “Archfiend” (cropped card art) |
+|---|---|
+| <img src="docs/screenshots/board-gelbooru.png" alt="Gelbooru search results for cat" width="430"> | <img src="docs/screenshots/board-ygoprodeck.png" alt="YGOPRODeck card art results" width="430"> |
+
+| Quick Caption | Aesthetic Scorer |
+|---|---|
+| <img src="docs/screenshots/quick-caption.png" alt="Quick Caption with a cat photo" width="430"> | <img src="docs/screenshots/aesthetic-scorer.png" alt="Aesthetic Scorer showing 5.91 for a sleeping cat" width="300"> |
 
 Screenshots use a small demo library of [CC0](https://creativecommons.org/publicdomain/zero/1.0/) cat photographs from
 Wikimedia Commons.

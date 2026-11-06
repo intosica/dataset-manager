@@ -1,6 +1,8 @@
 """Preferences: an Adw.PreferencesDialog whose changes apply immediately (no OK / Cancel)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from ..core import capabilities, models, paths, pkgs
@@ -28,13 +30,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.browser.set_text(s.browser_path)
         self.profile = PathRow("Browser profile (keeps logins and cookies)", mode="dir")
         self.profile.set_text(s.browser_profile_dir)
-        self.headless = Adw.SwitchRow(title="Run the browser without a window", active=s.headless)
+        self.headless = Adw.SwitchRow(title="Run the browser without a window",
+                                      subtitle="Imageboards always run hidden, whatever this says.", active=s.headless)
+        self.mature = Adw.SwitchRow(title="Mature content",
+                                    subtitle="Shows Rule34.xxx in the Collect page's source list.", active=s.mature_content)
         g1 = Adw.PreferencesGroup(title="Library")
         g1.add(self.library)
         self.follow = Adw.SwitchRow(title="Tag Editor follows the Library page",
                                     subtitle="Open whichever collection is selected on the Library page.",
                                     active=s.tag_editor_follow_library)
         g1.add(self.follow)
+        g1.add(self.mature)
         g2 = Adw.PreferencesGroup(title="Browser", description="Used for image searches.")
         for w in (self.browser, self.profile, self.headless):
             g2.add(w)
@@ -43,7 +49,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         general.add(g2)
         for row in (self.library, self.browser, self.profile):
             _apply_row(row, self._general_changed)
-        for w in (self.headless, self.follow):
+        for w in (self.headless, self.follow, self.mature):
             w.connect("notify::active", lambda *_: self._general_changed())
 
         # ---- Upscaling ----
@@ -92,7 +98,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
         s.library_dir, s.browser_path = self.library.get_text(), self.browser.get_text()
         s.browser_profile_dir, s.headless = self.profile.get_text(), self.headless.get_active()
         s.tag_editor_follow_library = self.follow.get_active()
+        s.mature_content = self.mature.get_active()
         self.state.save()
+        self.state.settings_changed.emit()
         if lib_changed:
             self.state.library_changed.emit()
 
@@ -254,11 +262,25 @@ class PreferencesDialog(Adw.PreferencesDialog):
             note = NoteRow()
             tag.add(note)
             self._model_rows[key] = (row, note)
+        self.florence_row = PathRow("Florence 2 models folder", mode="dir",
+                                    placeholder="Auto-detect ComfyUI → models/LLM")
+        self.florence_row.set_text(self.state.settings.florence_path)
+        _apply_row(self.florence_row, self._florence_path_changed)
+        tag.add(self.florence_row)
+        self.florence_note = NoteRow()
+        tag.add(self.florence_note)
         page.add(tag)
 
         self.dl_group = Adw.PreferencesGroup(title="Downloads", description="From Hugging Face; interrupted downloads resume.")
         page.add(self.dl_group)
         self._dl_rows = []
+
+        self.florence_group = Adw.PreferencesGroup(
+            title="Florence 2 downloads",
+            description="The same files ComfyUI-Florence2 uses. They are saved into the ComfyUI models/LLM folder "
+                        f"({models.florence_download_root(self.state.settings)}).")
+        page.add(self.florence_group)
+        self._florence_rows = []
 
         self.cache_row = PathRow("Cache folder for CLIP, similarity and aesthetic models",
                                  placeholder="App cache (default)")
@@ -281,6 +303,11 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.state.save()
         self._fill_models()
 
+    def _florence_path_changed(self) -> None:
+        self.state.settings.florence_path = self.florence_row.path()
+        self.state.save()
+        self._fill_models()
+
     def _cache_changed(self) -> None:
         self.state.settings.hf_cache_dir = self.cache_row.path()
         self.state.save()
@@ -293,6 +320,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             j = models.find_joycaption(s)
             found = {k: models.status(k, s) for k in models.MODELS}
             found["joycaption_path"] = j and (j.get("model") or j.get("path"))
+            found["florence"] = models.find_florence_models(s)
             return found
         self._models_tok = tok = getattr(self, "_models_tok", 0) + 1
         run_background(look, lambda f: self._fill_models_now(f) if tok == self._models_tok else None)
@@ -302,9 +330,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
         for key, (_row, note) in self._model_rows.items():
             found = have_all.get("joycaption_path") if key == "joycaption" else have_all.get(key)
             note.set_text(f"Found: {found}" if found else f"Not found in {models.location(key, s)}")
-        for r in self._dl_rows + self._prefetch_rows:
-            (self.dl_group if r in self._dl_rows else self.prefetch_group).remove(r)
-        self._dl_rows, self._prefetch_rows = [], []
+        florence = have_all.get("florence", [])
+        self.florence_group.set_description(
+            "The same files ComfyUI-Florence2 uses. They are saved into the ComfyUI models/LLM folder "
+            f"({models.florence_download_root(self.state.settings)}).")
+        self.florence_note.set_text(
+            "Found: " + ", ".join(m.name for m in florence) if florence else
+            "No Florence 2 models found. ComfyUI's models/LLM folder is scanned automatically; download one below.")
+        for r in self._dl_rows + self._prefetch_rows + self._florence_rows:
+            (self.dl_group if r in self._dl_rows else
+             self.prefetch_group if r in self._prefetch_rows else self.florence_group).remove(r)
+        self._dl_rows, self._prefetch_rows, self._florence_rows = [], [], []
         needs = {"hydra": ["torch", "einops", "safetensors"], "wd": ["torch", "timm", "safetensors"],
                  "joycaption": ["llama_cpp"], "joycaption_hf": ["torch", "accelerate"]}
         for key, m in models.MODELS.items():
@@ -327,6 +363,17 @@ class PreferencesDialog(Adw.PreferencesDialog):
             row.add_suffix(btn)
             self.prefetch_group.add(row)
             self._prefetch_rows.append(row)
+        needed = ["torch", "transformers", "timm", "einops"]
+        missing = [n for n in needed if not capabilities.has(n)]
+        for base, (repo, label, size) in models.FLORENCE_REPOS.items():
+            have = any(m.repo == repo or Path(m.path).name == base for m in florence)
+            row = Adw.ActionRow(title=GLib.markup_escape_text(label),
+                                subtitle=GLib.markup_escape_text(f"{size} · {repo}"))
+            if missing:
+                row.add_suffix(hint("needs " + ", ".join(missing)))
+            row.add_suffix(self._state_suffix(have, lambda r=repo: self._download_florence(r)))
+            self.florence_group.add(row)
+            self._florence_rows.append(row)
 
     @staticmethod
     def _state_suffix(done, on_click) -> Gtk.Widget:
@@ -343,6 +390,12 @@ class PreferencesDialog(Adw.PreferencesDialog):
         s = self.state.settings
         JobDialog(f"Download {models.MODELS[key]['name']}", str(models.download_dir(key, s)),
                   lambda ctx: models.download(key, s, ctx), lambda _ok: self._fill_models()).present(self)
+
+    def _download_florence(self, repo: str) -> None:
+        label = next((v[1] for v in models.FLORENCE_REPOS.values() if v[0] == repo), repo)
+        JobDialog(f"Download {label}", str(models.florence_download_root(self.state.settings)),
+                  lambda ctx: models.download_florence(repo, self.state.settings, ctx),
+                  lambda _ok: self._fill_models()).present(self)
 
     def _prefetch(self, key: str) -> None:
         JobDialog("Download model", models.PREFETCH[key][0], lambda ctx: models.prefetch(key, ctx)).present(self)

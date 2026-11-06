@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import shutil
+import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -71,22 +73,41 @@ async def apply_stealth(page) -> bool:
         return False
 
 
+def _chrome_ua(exe: str | None) -> str:
+    """A plain-Chrome user agent matching the installed browser (new headless otherwise says "HeadlessChrome")."""
+    major = "131"
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10).stdout if exe else ""
+        m = re.search(r"(\d+)\.\d+\.\d+", out)
+        major = m.group(1) if m else major
+    except Exception:
+        pass
+    return (f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36")
+
+
 @asynccontextmanager
-async def open_browser(settings: Settings, ctx: TaskContext, prefer_system: bool = False):
-    """Yields (context, page) for a persistent browser profile."""
+async def open_browser(settings: Settings, ctx: TaskContext, prefer_system: bool = False, hidden: bool = False):
+    """Yields (context, page) for a persistent browser profile.
+
+    hidden=True runs the full browser with Chrome's "new headless" mode and a normal user agent: no window opens, and
+    bot checks treat it like a windowed browser (the old headless shell gets a Cloudflare 403). Ignores settings.headless.
+    """
     from playwright.async_api import async_playwright
 
     configure_environment()
     exe = find_browser(settings.browser_path, prefer_system)
-    headless = settings.headless or not has_display()
+    headless = False if hidden else (settings.headless or not has_display())
     if headless and not settings.headless:
         ctx.log("No display detected; running the browser headless.")
-    ctx.log(f"Browser: {exe or 'Playwright bundled Chromium'} ({'headless' if headless else 'windowed'})")
+    ctx.log(f"Browser: {exe or 'Playwright bundled Chromium'} ({'hidden' if hidden else 'headless' if headless else 'windowed'})")
     async with async_playwright() as p:
         kwargs = dict(user_data_dir=settings.profile_path(), headless=headless,
                       no_viewport=True,   # real window size; an emulated viewport smaller than the window is a bot tell
                       args=["--disable-blink-features=AutomationControlled"],
                       ignore_default_args=["--enable-automation"])
+        if hidden:
+            kwargs.update(no_viewport=False, viewport={"width": 1366, "height": 900}, user_agent=_chrome_ua(exe))
+            kwargs["args"] = kwargs["args"] + ["--headless=new"]
         if exe:
             kwargs["executable_path"] = exe
         try:

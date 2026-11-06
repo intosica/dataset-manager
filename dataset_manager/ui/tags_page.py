@@ -16,10 +16,20 @@ class TagsPage(Gtk.Box):
         self.editor = TagEditor(state)
         stack.add_titled_with_icon(self.editor, "editor", "Tag Editor", "document-edit-symbolic")
         stack.add_titled_with_icon(UploadHelper(state), "upload", "Imageboard Upload Helper", "send-to-symbolic")
+        from .image_tools import AestheticScorer, QuickCaption
+        self.scorer, self.quick = AestheticScorer(state), QuickCaption(state)
+        stack.add_titled_with_icon(self.scorer, "scorer", "Aesthetic Scorer", "starred-symbolic")
+        stack.add_titled_with_icon(self.quick, "quick", "Quick Caption", "chat-message-new-symbolic")
+        self.stack = stack
         kind = getattr(Adw, "InlineViewSwitcher", None) or Adw.ViewSwitcher     # Inline needs libadwaita 1.7
         switcher = kind(stack=stack, halign=Gtk.Align.CENTER, margin_top=8, margin_bottom=2)
         self.append(switcher)
         self.append(stack)
+        state.open_in_tool.connect(self._open_in_tool)
+
+    def _open_in_tool(self, tool: str, path: str) -> None:
+        self.stack.set_visible_child_name(tool)
+        (self.scorer.open_path if tool == "scorer" else self.quick.set_image)(path)
 
 
 class UploadHelper(Gtk.Box):

@@ -4,90 +4,50 @@ import os
 
 from gi.repository import Adw, Gdk, GLib, Gtk
 
-from ..core.duplicates import HASH_BITS, apply_removals, scan_duplicates
+from ..core.duplicates import apply_removals, scan_duplicates
 from ..core.imaging import make_thumbnails
 from ..core.utils import fmt_bytes
-from .widgets import TaskPanel, alert, open_path
+from .image_menu import attach_image_menu
+from .widgets import alert, open_path
 
 
-def _threshold_text(v: int) -> str:
-    if v == 0:
-        return "Exact copies only"
-    return f"{v} of {HASH_BITS} bits" + (" (recommended)" if v == 6 else "")
+class DuplicateReview(Gtk.Box):
+    """Scan a folder for look-alike images, then pick which copies go to the Trash (used by Maintenance)."""
 
-
-class DuplicatesPage(Gtk.Box):
-    def __init__(self, state):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL)
-        self.state = state
-        self.checks: list[tuple[Gtk.CheckButton, str, str]] = []     # (check, keeper path, duplicate path)
-
-        self.thr = Adw.SpinRow.new_with_range(0, 20, 1)
-        self.thr.set_title("Similarity")
-        self.thr.set_value(state.settings.duplicate_threshold)
-        self.thr.set_subtitle(_threshold_text(int(self.thr.get_value())))
-        self.thr.connect("notify::value", lambda *_: self.thr.set_subtitle(_threshold_text(int(self.thr.get_value()))))
-        self.scope = Adw.ComboRow(title="Compare", model=Gtk.StringList.new(["Whole library", "Within each collection"]))
-        opts = Adw.PreferencesGroup(title="Find duplicates")
-        opts.add(self.thr)
-        opts.add(self.scope)
-
-        self.scan_btn = Gtk.Button(label="Scan")
-        self.scan_btn.add_css_class("suggested-action")
-        self.cancel_btn = Gtk.Button(label="Cancel", sensitive=False)
+    def __init__(self, state, panel):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8, visible=False)
+        self.state, self.panel = state, panel
+        self.checks: list[tuple[Gtk.CheckButton, str, str, int]] = []     # (check, keeper, duplicate, size)
         self.trash_btn = Gtk.Button(label="Move to Trash", sensitive=False)
+        self.trash_btn.add_css_class("suggested-action")
         self.delete_btn = Gtk.Button(label="Delete Permanently", sensitive=False)
         self.delete_btn.add_css_class("destructive-action")
-        self.selection_label = Gtk.Label(label="Nothing to review.", xalign=0, hexpand=True)
-        self.selection_label.add_css_class("dim-label")
-        actions = Gtk.Box(spacing=8, margin_top=6)
-        for w in (self.scan_btn, self.cancel_btn, self.selection_label, self.trash_btn, self.delete_btn):
+        self.close_btn = Gtk.Button(label="Close")
+        self.selection_label = Gtk.Label(label="Nothing to review.", xalign=0, hexpand=True, css_classes=["dim-label"])
+        actions = Gtk.Box(spacing=8)
+        for w in (Gtk.Label(label="Duplicates", css_classes=["title-4"]), self.selection_label, self.close_btn,
+                  self.trash_btn, self.delete_btn):
             actions.append(w)
-
         self.groups = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        self.panel = TaskPanel(min_height=90)
-        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        top.append(opts)
-        top.append(actions)
-        top.append(self.groups)
-        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER,
-                                    child=Adw.Clamp(maximum_size=960, child=top, margin_top=18, margin_bottom=18,
-                                                    margin_start=12, margin_end=12))
-        bottom = Gtk.Box(margin_start=18, margin_end=18, margin_bottom=12)
-        self.panel.set_hexpand(True)
-        bottom.append(self.panel)
-        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, vexpand=True, resize_end_child=False,
-                          shrink_start_child=False, shrink_end_child=False, start_child=scroll, end_child=bottom,
-                          position=560)
-        self.append(paned)
-
-        self.scan_btn.connect("clicked", lambda _b: self.scan())
-        self.cancel_btn.connect("clicked", lambda _b: self.panel.cancel())
+        self.append(actions)
+        self.append(self.groups)
         self.trash_btn.connect("clicked", lambda _b: self.remove("trash"))
         self.delete_btn.connect("clicked", lambda _b: self.remove("delete"))
-        self.panel.on_busy(self._busy)
+        self.close_btn.connect("clicked", lambda _b: (self._clear(), self.set_visible(False)))
+        panel.on_busy(lambda _b: self._update_selection())
 
-    def _busy(self, busy: bool) -> None:
-        self.scan_btn.set_sensitive(not busy)
-        self.cancel_btn.set_sensitive(busy)
-        self._update_selection()
-
-    # ---- scanning ----
     def _clear(self) -> None:
         while (c := self.groups.get_first_child()) is not None:
             self.groups.remove(c)
         self.checks.clear()
-
-    def scan(self) -> None:
-        base = self.state.library
-        thr, scope = int(self.thr.get_value()), ("library", "collection")[self.scope.get_selected()]
-        self.state.settings.duplicate_threshold = thr
-        self.state.save()
-        self._clear()
         self._update_selection()
 
+    def scan(self, base: str, thr: int) -> None:
+        self._clear()
+        self.set_visible(True)
+
         def job(ctx):
-            groups = scan_duplicates(base, thr, scope, ctx)
+            groups = scan_duplicates(base, thr, "library", ctx)
             shown, rows = [], 0
             for g in groups[:300]:                # keep the results view light: at most ~1500 rows
                 rows += len(g.duplicates) + 1
@@ -104,13 +64,12 @@ class DuplicatesPage(Gtk.Box):
                         thumbs[f] = Gdk.Texture.new_from_filename(t)   # decode here, not on the main thread
                     except GLib.Error:
                         pass
-            return groups, shown, thumbs
+            return groups, shown, thumbs, base
 
         if os.path.isdir(base):
             self.panel.run(job, self._show_groups, name="Duplicate scan")
         else:
-            self.panel.clear()
-            self.panel.log(f"Library folder not found: {base}")
+            self.panel.log(f"Folder not found: {base}")
 
     def _row(self, rec, keep: bool, thumbs, base, keeper_path) -> Adw.ActionRow:
         rel = os.path.relpath(os.path.dirname(rec["path"]), base)
@@ -125,6 +84,7 @@ class DuplicatesPage(Gtk.Box):
             pic.add_css_class("thumb")
             row.add_prefix(pic)
         row.connect("activated", lambda _r, p=rec["path"]: open_path(p))
+        attach_image_menu(row, lambda p=rec["path"]: p, self.state)
         if keep:
             tag = Gtk.Label(label="Keep")
             tag.add_css_class("success")
@@ -137,8 +97,7 @@ class DuplicatesPage(Gtk.Box):
         return row
 
     def _show_groups(self, result) -> None:
-        groups, shown, thumbs = result
-        base = self.state.library
+        groups, shown, thumbs, base = result
         for n, g in enumerate(shown, 1):
             grp = Adw.PreferencesGroup(title=f"Group {n}: {len(g.duplicates) + 1} images",
                                        description=f"{fmt_bytes(g.reclaimable)} reclaimable")
@@ -148,6 +107,7 @@ class DuplicatesPage(Gtk.Box):
             self.groups.append(grp)
         if not shown:
             self.panel.log("No duplicates found.")
+            self.set_visible(False)
         if len(groups) > len(shown):
             self.panel.log(f"Showing the {len(shown)} largest of {len(groups)} groups. "
                            "Remove these and scan again to continue.")
@@ -183,7 +143,7 @@ class DuplicatesPage(Gtk.Box):
                 self.panel.log(f"{'Deleted' if mode == 'delete' else 'Moved to Trash'}: {res.removed} images "
                                f"({fmt_bytes(res.freed)})" + (f", {res.failed} failed" if res.failed else ""))
                 self._clear()
-                self._update_selection()
+                self.set_visible(False)
                 self.state.content_changed.emit()
             self.panel.run(lambda ctx: apply_removals(sel, mode, ctx), done, with_trash=(mode == "trash"),
                            name="Removing duplicates")

@@ -1,18 +1,51 @@
-"""Auto-taggers: JTP Hydra 3.5 (e621 vocabulary) and WD EVA02 Large v3 (Danbooru vocabulary).
+"""Auto-taggers: JTP Hydra 3.5 (e621), WD EVA02 Large v3 (Danbooru), and Florence-2.
 
-Both run with torch on the GPU when there is one. A loaded tagger stays in memory until another one is
-chosen or `unload()` is called, so tagging a second batch starts instantly.
+Hydra and WD run with torch on the GPU when there is one. Florence-2 uses the ComfyUI model folders as-is.
+A loaded tagger stays in memory until another one is chosen or `unload()` is called.
 """
 from __future__ import annotations
 
 import csv
 import os
+import re
 import threading
 
 from . import models
 
 _lock = threading.Lock()
 _loaded: dict = {}          # {"key": ..., "path": ..., "tagger": ...}
+
+FLORENCE_TASKS = [
+    ("dense", "<DENSE_REGION_CAPTION>", "Dense region captions"),
+    ("detailed", "<DETAILED_CAPTION>", "Detailed caption"),
+    ("more", "<MORE_DETAILED_CAPTION>", "More detailed caption"),
+    ("ocr", "<OCR>", "OCR (text in the image)"),
+]
+FLORENCE_PROMPTS = {key: prompt for key, prompt, _label in FLORENCE_TASKS}
+FLORENCE_LABELS = {key: label for key, _prompt, label in FLORENCE_TASKS}
+
+
+def _caption_tags(text: str) -> list[str]:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    out, seen = [], set()
+    for part in re.split(r"[,;\n]+", text):
+        part = part.strip().strip(".\"' ")
+        if part and part.casefold() not in seen:
+            seen.add(part.casefold())
+            out.append(part)
+    return out[:256]
+
+
+def _florence_text(parsed, prompt: str) -> str:
+    value = parsed.get(prompt, parsed) if isinstance(parsed, dict) else parsed
+    if isinstance(value, dict):
+        if "labels" in value:
+            return ", ".join(str(x) for x in value["labels"])
+        if "text" in value:
+            t = value["text"]
+            return ", ".join(str(x) for x in t) if isinstance(t, (list, tuple)) else str(t)
+        return ""
+    return str(value or "")
 
 
 def _device():
@@ -109,27 +142,104 @@ class WDTagger:
         return out
 
 
+class FlorenceTagger:
+    """Florence-2 from a local ComfyUI models/LLM folder (trust_remote_code)."""
+    batch = 1
+
+    def __init__(self, path: str, task: str = "more"):
+        import torch
+        import transformers
+        from transformers import AutoModelForCausalLM, AutoProcessor
+        if not florence_transformers_ok(transformers.__version__):
+            raise RuntimeError(
+                f"Florence-2 needs transformers 4.38–4.46, but {transformers.__version__} is installed. "
+                "Run: pip install 'transformers>=4.38,<4.47' (or reinstall it from Preferences → System)."
+            )
+        self.torch = torch
+        self.dev = _device()
+        self.dtype = torch.float16 if self.dev.type == "cuda" else torch.float32
+        self.processor = AutoProcessor.from_pretrained(path, trust_remote_code=True)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            path, trust_remote_code=True, torch_dtype=self.dtype, attn_implementation="eager"
+        ).to(self.dev).eval()
+        self.set_task(task)
+
+    def set_threshold(self, threshold: float) -> None:
+        pass                      # Florence has no probability threshold
+
+    def set_task(self, task: str) -> None:
+        self.task = task if task in FLORENCE_PROMPTS else "more"
+        self.prompt = FLORENCE_PROMPTS[self.task]
+
+    def tag(self, files: list[str]) -> list[dict]:
+        from PIL import Image
+        out = []
+        for f in files:
+            with Image.open(f) as im:
+                img = im.convert("RGB")
+            inputs = self.processor(images=img, text=self.prompt, return_tensors="pt")
+            inputs = {k: (v.to(self.dev, dtype=self.dtype) if self.torch.is_floating_point(v) else v.to(self.dev))
+                      for k, v in inputs.items()}
+            with self.torch.inference_mode():
+                ids = self.model.generate(
+                    input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"],
+                    max_new_tokens=1024, num_beams=3, do_sample=False, early_stopping=False,
+                )
+            text = self.processor.batch_decode(ids, skip_special_tokens=False)[0]
+            parsed = self.processor.post_process_generation(text, task=self.prompt, image_size=img.size)
+            text = _florence_text(parsed, self.prompt)
+            # Dense labels are tags; the caption/OCR tasks produce prose, so keep each as one caption.
+            tags = _caption_tags(text) if self.task == "dense" else ([text] if text else [])
+            out.append({t: 1.0 for t in tags})
+        return out
+
+
+def florence_transformers_ok(version: str) -> bool:
+    """Florence-2's remote code uses the legacy KV-cache API, removed in transformers 4.47."""
+    try:
+        parts = tuple(int(x) for x in version.split(".")[:2])
+    except ValueError:
+        return True
+    return (4, 38) <= parts < (4, 47)
+
+
 def pretty(tag: str) -> str:
     """'long_hair' -> 'long hair'; short kaomoji like '^_^' keep their underscores."""
     return tag.replace("_", " ") if len(tag) > 3 else tag
 
 
 def get(key: str, settings, log=print):
-    """The tagger `key` ('hydra' | 'wd'), loading it on first use."""
-    path = models.find_hydra(settings) if key == "hydra" else models.find_wd(settings)
-    if not path:
-        raise FileNotFoundError(f"{models.MODELS[key]['name']} isn't downloaded. Set its folder or download it in "
-                                "Preferences → Models.")
+    """The tagger `key` ('hydra' | 'wd' | 'florence:<folder>'), loading it on first use."""
+    if key.startswith("florence:"):
+        path = key.split(":", 1)[1]
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"Florence model folder not found: {path}. Pick another model or set the folder in "
+                                    "Preferences → Models.")
+        label = os.path.basename(path)
+    else:
+        path = models.find_hydra(settings) if key == "hydra" else models.find_wd(settings)
+        if not path:
+            raise FileNotFoundError(f"{models.MODELS[key]['name']} isn't downloaded. Set its folder or download it in "
+                                    "Preferences → Models.")
+        label = models.MODELS[key]["name"]
     thr = float(getattr(settings, "tag_threshold", 0) or 0)
+    task = getattr(settings, "florence_task", "more")
     with _lock:
-        if _loaded.get("key") == (key, path):          # a new threshold doesn't need a 1 GB reload
-            if _loaded.get("thr") != thr:
+        if _loaded.get("key") == (key, path):          # a new threshold/task doesn't need a full reload
+            if key.startswith("florence:"):
+                _loaded["tagger"].set_task(task)
+            elif _loaded.get("thr") != thr:
                 _loaded["tagger"].set_threshold(thr)
                 _loaded["thr"] = thr
             return _loaded["tagger"]
         unload()
-        log(f"Loading {models.MODELS[key]['name']} from {path}…")
-        t = HydraTagger(path, thr) if key == "hydra" else WDTagger(path, thr)
+        log(f"Loading {label} from {path}…")
+        if key.startswith("florence:"):
+            t = FlorenceTagger(path, task)
+        elif key == "hydra":
+            t = HydraTagger(path, thr)
+        else:
+            t = WDTagger(path, thr)
         _loaded.update(key=(key, path), thr=thr, tagger=t)
         return t
 

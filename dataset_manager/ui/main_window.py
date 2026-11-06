@@ -6,7 +6,6 @@ from .. import APP_NAME, __version__
 from ..core import pkgs
 from ..core.sessions import SessionStore
 from .collect_page import CollectPage
-from .duplicates_page import DuplicatesPage
 from .library_page import LibraryPage
 from .maintenance_page import MaintenancePage
 from .preferences import PreferencesDialog
@@ -16,7 +15,6 @@ from .widgets import TaskPanel, alert, icon_button, open_path
 
 PAGES = [("collect", "Collect", "folder-download-symbolic", CollectPage),
          ("library", "Library", "folder-pictures-symbolic", LibraryPage),
-         ("duplicates", "Duplicates", "edit-copy-symbolic", DuplicatesPage),
          ("maintenance", "Maintenance", "applications-engineering-symbolic", MaintenancePage),
          ("tags", "Tag Tools", "bookmark-new-symbolic", TagsPage)]
 
@@ -99,6 +97,7 @@ class MainWindow(Adw.ApplicationWindow):
             act.connect("activate", lambda _a, _p, n=name: self.stack.set_visible_child_name(n))
             self.add_action(act)
 
+        state.open_in_tool.connect(lambda *_a: self.stack.set_visible_child_name("tags"))
         state.library_changed.connect(self._update_chrome)
         self._update_chrome()
         self.connect("close-request", self._close_request)

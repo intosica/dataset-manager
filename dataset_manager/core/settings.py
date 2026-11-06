@@ -13,7 +13,8 @@ class Settings:
     library_dir: str = ""
     browser_path: str = ""            # blank = auto-detect
     browser_profile_dir: str = ""     # blank = app data folder
-    headless: bool = False
+    headless: bool = False            # ignored by the imageboards, which always run hidden
+    mature_content: bool = False      # reveals Rule34.xxx in the source list
     model_dirs: list = field(default_factory=list)   # extra folders scanned for upscale models
     upscale_model: str = ""           # "" = first found · "none" = standard resize · or a full path
     target_dim: int = 1024
@@ -32,12 +33,14 @@ class Settings:
     hydra_path: str = ""
     wd_path: str = ""
     joycaption_path: str = ""
+    florence_path: str = ""         # blank = auto-detect ComfyUI models/LLM
     hf_cache_dir: str = ""            # blank = app cache; where CLIP / aesthetic / similarity models go
     tag_threshold: float = 0.0       # 0 = automatic (Hydra: calibrated per tag · WD: 0.35)
     tag_editor_dir: str = ""          # last folder opened in the Tag Editor
     tag_editor_follow_library: bool = False   # Tag Editor opens whatever the Library page has selected
     upscale_preserve_originals: bool = False  # Library → Upscale keeps copies in original_images/
-    tagger: str = "hydra"             # hydra | wd
+    tagger: str = "hydra"             # hydra | wd | florence:<folder>
+    florence_task: str = "more"      # dense | detailed | more | ocr
     joy_caption_type: str = "Descriptive"
     joy_caption_length: str = "long"
     joy_extra: list = field(default_factory=list)

@@ -6,11 +6,12 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from ..core import capabilities
 from ..core.aesthetic_score import NOTE, AestheticFilter, AestheticSpec
-from ..core.collector import CollectOptions, run_collection
+from ..core.collector import CollectOptions, derive_names, run_collection
 from ..core.similarity import BACKENDS, SHORT, SimilaritySpec
 from ..core.sink import SinkOptions
-from ..core.sources import SOURCES
+from ..core.sources import BOARD_KEYS, boards, visible_sources
 from ..core.sources.filters import NO_SAFE_SEARCH
+from .board_results import BoardResultsView
 from .filter_panel import FilterPanel
 from .widgets import ModelPicker, NoteRow, PathRow, TaskPanel, icon_button
 
@@ -20,6 +21,9 @@ except ImportError:                                  # visual search module not 
     SIMILAR_ENGINES = ()
 
 OFF = "Off: keep everything"
+RATINGS = [("", "All ratings"), ("general", "General"), ("sensitive", "Sensitive"),
+           ("questionable", "Questionable"), ("explicit", "Explicit")]
+BOARD_SORTS = [("new", "Newest"), ("score", "Highest score"), ("random", "Random")]
 
 
 def _spin(title: str, lo: int, hi: int, step: int, value: int, subtitle: str = "") -> Adw.SpinRow:
@@ -62,11 +66,12 @@ class CollectPage(Gtk.Box):
         s = state.settings
         self.changed = []          # callbacks: parameters changed by the user
         self._loading = False
-        self.keys = [k for k, _l, _a in SOURCES]
-        self.artist = {k: a for k, _l, a in SOURCES}
+        sources = visible_sources(s.mature_content)
+        self.keys = [k for k, _l, _a in sources]
+        self.artist = {k: a for k, _l, a in sources}
 
         # ---- source ----
-        self.source = Adw.ComboRow(title="Source", model=Gtk.StringList.new([lbl for _k, lbl, _a in SOURCES]))
+        self.source = Adw.ComboRow(title="Source", model=Gtk.StringList.new([lbl for _k, lbl, _a in sources]))
         self.query = Adw.EntryRow(title="Search terms or URL")
         self.name = Adw.EntryRow(title="Collection name (defaults to the search terms)")
         g_source = Adw.PreferencesGroup(title="Source")
@@ -78,6 +83,24 @@ class CollectPage(Gtk.Box):
         self.g_safe = Adw.PreferencesGroup()
         self.g_safe.add(self.no_safe)
         self.filters = FilterPanel()
+
+        # ---- imageboards ----
+        self.archetype = Adw.EntryRow(title="Archetype (e.g. Archfiend)")
+        self.negative = Adw.EntryRow(title="Negative tags (exclude)")
+        self.board_score = _spin("Minimum score", 0, 100000, 10, 0, "0 = no score filter")
+        self.board_rating = Adw.ComboRow(title="Rating", model=Gtk.StringList.new([l for _k, l in RATINGS]))
+        self.board_sort = Adw.ComboRow(title="Sort", model=Gtk.StringList.new([l for _k, l in BOARD_SORTS]))
+        self.pull = _switch("Pull caption tags from the imageboard", True,
+                            "Writes the board's own tags to a .txt next to each image")
+        self.board_caption_order = Adw.ComboRow(
+            title="Tag order in the caption", model=Gtk.StringList.new([l for _k, l in boards.CAPTION_ORDERS]))
+        self.g_board = Adw.PreferencesGroup(
+            title="Imageboard search",
+            description="Positive tags use the board's own syntax (score:, rating:, wildcards, ~ OR, - exclude). "
+                        "The score, rating and sort controls are added to the search for you.")
+        for w in (self.archetype, self.negative, self.board_score, self.board_rating, self.board_sort, self.pull,
+                  self.board_caption_order):
+            self.g_board.add(w)
 
         # ---- visual search ----
         self.seed = SeedRow()
@@ -121,11 +144,11 @@ class CollectPage(Gtk.Box):
             value=0, lower=-1, upper=1, step_increment=0.01, page_increment=0.05), digits=2,
             subtitle="Score = similarity to the examples minus similarity to the ones to avoid. "
                      "Images at or below the threshold are skipped.")
-        g_sim = Adw.PreferencesGroup(title="Keep only images that look like my examples",
-                                     description="Pick a model to switch the filter on. Models download on first use.")
+        self.g_sim = Adw.PreferencesGroup(title="Keep only images that look like my examples",
+                                          description="Pick a model to switch the filter on. Models download on first use.")
         self.backend_note = NoteRow()
         for w in (self.backend, self.backend_note, self.pos_dir, self.neg_dir, self.threshold):
-            g_sim.add(w)
+            self.g_sim.add(w)
         self.backend.connect("notify::selected", self._backend_changed)
 
         # ---- aesthetic score filter ----
@@ -149,6 +172,7 @@ class CollectPage(Gtk.Box):
         buttons.append(self.cancel_btn)
         buttons.append(self.start_btn)
         self.panel = TaskPanel()
+        self.board_view = BoardResultsView(state, self.panel, self._board_folder, self._board_opts, self._board_page)
         bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=18, margin_end=18,
                          margin_bottom=12, margin_top=6)
         bottom.append(buttons)
@@ -156,7 +180,8 @@ class CollectPage(Gtk.Box):
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=18, margin_bottom=18,
                           margin_start=12, margin_end=12)
-        for w in (g_source, self.g_safe, self.filters, self.g_seed, g_opts, g_sim, self.g_aes):
+        for w in (g_source, self.g_board, self.g_safe, self.filters, self.board_view, self.g_seed, g_opts,
+                  self.g_sim, self.g_aes):
             content.append(w)
         clamp = Adw.Clamp(maximum_size=860, tightening_threshold=600, child=content)
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER, child=clamp)
@@ -166,6 +191,7 @@ class CollectPage(Gtk.Box):
         self.append(paned)
 
         self.source.connect("notify::selected", self._source_changed)
+        self.pull.connect("notify::active", lambda *_: self._pull_changed())
         self.query.connect("entry-activated", lambda _r: self.start())
         self.start_btn.connect("clicked", lambda _b: self.start())
         self.cancel_btn.connect("clicked", lambda _b: self.panel.cancel())
@@ -178,6 +204,9 @@ class CollectPage(Gtk.Box):
                        (self.randomize, "notify::active"), (self.skip_dups, "notify::active"),
                        (self.sort_orient, "notify::active"), (self.resize, "notify::active"),
                        (self.target, "notify::value"), (self.captions, "notify::active"), (self.extra, "changed"),
+                       (self.negative, "changed"), (self.archetype, "changed"), (self.board_score, "notify::value"),
+                       (self.board_rating, "notify::selected"), (self.board_sort, "notify::selected"),
+                       (self.pull, "notify::active"), (self.board_caption_order, "notify::selected"),
                        (self.backend, "notify::selected"), (self.pos_dir, "changed"), (self.neg_dir, "changed"),
                        (self.threshold, "notify::value"), (self.aesthetic, "notify::active"),
                        (self.aes_threshold, "notify::value")]:
@@ -210,6 +239,11 @@ class CollectPage(Gtk.Box):
             "skip_duplicates": self.skip_dups.get_active(), "sort_by_orientation": self.sort_orient.get_active(),
             "resize": self.resize.get_active(), "target_dim": int(self.target.get_value()),
             "captions": self.captions.get_active(), "extra_tags": self.extra.get_text(),
+            "negative": self.negative.get_text(), "archetype": self.archetype.get_text(), "board_score": int(self.board_score.get_value()),
+            "board_rating": RATINGS[self.board_rating.get_selected()][0],
+            "board_sort": BOARD_SORTS[self.board_sort.get_selected()][0],
+            "pull_captions": self.pull.get_active(),
+            "caption_order": boards.CAPTION_ORDERS[self.board_caption_order.get_selected()][0],
             "similarity": {"enabled": sel > 0, "backend": self.backend_keys[max(sel - 1, 0)],
                            "positive_dir": self.pos_dir.get_text(), "negative_dir": self.neg_dir.get_text(),
                            "threshold": round(self.threshold.get_value(), 3)},
@@ -231,6 +265,14 @@ class CollectPage(Gtk.Box):
                 self.source.set_selected(self.keys.index(d["source"]))
             self.query.set_text(d["query"])
             self.name.set_text(d["name"])
+            self.negative.set_text(d["negative"])
+            self.archetype.set_text(d["archetype"])
+            self.board_score.set_value(d["board_score"])
+            self.board_rating.set_selected(next((i for i, (k, _l) in enumerate(RATINGS) if k == d["board_rating"]), 0))
+            self.board_sort.set_selected(next((i for i, (k, _l) in enumerate(BOARD_SORTS) if k == d["board_sort"]), 0))
+            self.pull.set_active(bool(d["pull_captions"]))
+            self.board_caption_order.set_selected(
+                next((i for i, (k, _l) in enumerate(boards.CAPTION_ORDERS) if k == d["caption_order"]), 0))
             self.no_safe.set_active(bool(d["safe_search_off"]))
             self.filters.set_all_selections(d["filters"])
             self._source_changed()
@@ -263,35 +305,152 @@ class CollectPage(Gtk.Box):
                 "seed": "", "seed_count": 3, "limit": 100, "min_side": s.min_image_side, "parallel": s.parallel_downloads,
                 "randomize": False, "skip_duplicates": True, "sort_by_orientation": True, "resize": False,
                 "target_dim": s.target_dim, "captions": True, "extra_tags": s.extra_tags,
+                "negative": "", "archetype": "", "board_score": 0, "board_rating": "", "board_sort": "new", "pull_captions": True,
+                "caption_order": "default",
                 "similarity": {"enabled": False, "backend": self.backend_keys[0], "positive_dir": "",
                                "negative_dir": "", "threshold": 0.0},
                 "aesthetic": {"enabled": False, "threshold": 5.5}}
 
     # ---- reactions ----
+    def _rebuild_sources(self) -> None:
+        """Mature content toggled: show/hide Rule34.xxx, keeping the current source if it is still listed."""
+        sources = visible_sources(self.state.settings.mature_content)
+        keys = [k for k, _l, _a in sources]
+        if keys == self.keys:
+            return
+        cur = self.current_key()
+        self._loading = True
+        self.keys, self.artist = keys, {k: a for k, _l, a in sources}
+        self.source.set_model(Gtk.StringList.new([lbl for _k, lbl, _a in sources]))
+        self.source.set_selected(keys.index(cur) if cur in keys else 0)
+        self._loading = False
+        self._source_changed()
+
     def _reload(self) -> None:
+        self._rebuild_sources()
         if not self.panel.busy and self.extra.get_text() != self.state.settings.extra_tags:
             self.extra.set_text(self.state.settings.extra_tags)
 
     def _resize_toggled(self, *_a) -> None:
-        on = self.resize.get_active()
+        on = self.resize.get_active() and self.current_key() not in BOARD_KEYS
         self.target.set_visible(on)
         self.model_picker.set_visible(on)
+
+    def _pull_changed(self, *_a) -> None:
+        self.board_caption_order.set_visible(self.current_key() in BOARD_KEYS and self.pull.get_active())
+        self._edited()
 
     def _source_changed(self, *_a) -> None:
         key = self.current_key()
         artist = self.artist[key]
+        board = key in BOARD_KEYS
         self.filters.set_engine(key)
-        self.filters.set_visible(not artist)
-        self.g_safe.set_visible(not artist and key not in NO_SAFE_SEARCH)
-        self.g_seed.set_visible(key in SIMILAR_ENGINES)
-        self.query.set_title("Artist name" if artist else "Search terms or URL")
+        ygo = key == "ygoprodeck"
+        self.filters.set_visible(ygo or (not artist and not board))
+        self.g_board.set_visible(board)
+        self.board_view.set_visible(board)
+        self.g_safe.set_visible(not artist and not board and key not in NO_SAFE_SEARCH)
+        self.g_seed.set_visible(not board and key in SIMILAR_ENGINES)
+        self.g_sim.set_visible(not board)
+        self.g_aes.set_visible(not board)
+        self.captions.set_visible(not board)
+        self.extra.set_visible(not board and self.captions.get_active())
+        self.limit.set_visible(not board)
+        self.min_side.set_visible(not board)
+        self.randomize.set_visible(not board)
+        self.parallel.set_visible(not board)
+        self.sort_orient.set_visible(not board)
+        self.resize.set_visible(not board)
+        detailed = board and not ygo
+        self.g_board.set_title("YGOPRODeck card search" if ygo else "Imageboard search")
+        self.g_board.set_description(
+            "Search by card name and/or archetype, then narrow it with the filters below. The cropped card art is used."
+            if ygo else
+            "Positive tags use the board's own syntax (score:, rating:, wildcards, ~ OR, - exclude). "
+            "The score, rating and sort controls are added to the search for you. Videos and animated GIFs are hidden."
+            + (" Danbooru lets guests search only 2 tags; extra tags are filtered here instead." if key == "danbooru" else ""))
+        self.archetype.set_visible(ygo)
+        self.negative.set_visible(detailed)
+        self.board_score.set_visible(detailed)
+        self.board_rating.set_visible(detailed)
+        self.board_sort.set_visible(detailed)
+        self.pull.set_visible(board)
+        self.board_caption_order.set_visible(board and self.pull.get_active())
+        self.query.set_title("Card name (optional)" if ygo else "Positive tags (optional)" if board else ("Artist name" if artist else "Search terms or URL"))
+        self.start_btn.set_label("Search" if board else "Start Collection")
+        self._resize_toggled()
+        if board:
+            if getattr(self, "_board_source", None) != key:
+                self.board_view.clear()
+                self._board_source = key
+        else:
+            self._board_source = key
+            self.board_view.clear()
         self._seed_changed()
 
     def _seed_changed(self) -> None:
         """A seed image means visual search only, so the search terms have nothing left to do."""
+        board = self.current_key() in BOARD_KEYS
         seed = self.seed.get_text().strip() if self.g_seed.get_visible() else ""
-        self.query.set_visible(not seed)
+        self.query.set_visible(board or not seed)
         self.name.set_title("Collection name" if seed else "Collection name (defaults to the search terms)")
+
+    def _board_query(self) -> boards.BoardQuery:
+        p = self.params()
+        return boards.BoardQuery(p["source"], p["query"], p["negative"], p["board_score"], p["board_rating"],
+                                 p["board_sort"], 0, p["caption_order"], p["archetype"],
+                                 self.filters.selection() if p["source"] == "ygoprodeck" else {})
+
+    def _board_search(self, offset: int, query: boards.BoardQuery | None = None) -> None:
+        if self.panel.busy or self.current_key() not in BOARD_KEYS:
+            return
+        if self.current_key() != "ygoprodeck" and not capabilities.has("playwright"):
+            self.panel.log("Imageboard search needs Playwright: install it in Preferences → System.")
+            return
+        q = query or self._board_query()
+        self.board_view.set_visible(True)
+        self.board_view.set_loading()
+
+        def job(ctx):
+            try:
+                return True, boards.search_page(q, offset, self.state.settings, ctx)
+            except Exception as exc:
+                return False, str(exc)
+
+        def done(result):
+            ok, value = result
+            if self.current_key() != q.board:
+                return
+            if not ok:
+                self.board_view.show_error(value)
+                self.panel.log(value)
+                return
+            self._board_query_obj = q
+            self.board_view.show(value, q)
+
+        self.panel.run(job, done, name=f"{q.label} search")
+
+    def _board_page(self, offset: int) -> None:
+        q = getattr(self, "_board_query_obj", None)
+        if q:
+            self._board_search(offset, q)
+
+    def _board_folder(self):
+        p = self.params()
+        tag, folder = derive_names(((getattr(self, "_board_query_obj", None).positive or self._board_query_obj.archetype)
+                                    if getattr(self, "_board_query_obj", None) else p["query"]) or "imageboard",
+                                   p["name"], fallback="Imageboard")
+        library = os.path.abspath(self.state.settings.library_path())
+        save_dir = os.path.abspath(os.path.join(library, folder))
+        if os.path.commonpath([save_dir, library]) != library:
+            return None
+        return save_dir, tag
+
+    def _board_opts(self) -> SinkOptions:
+        p = self.params()
+        return SinkOptions(min_side=0, resize=False, skip_duplicates=p["skip_duplicates"],
+                           duplicate_threshold=self.state.settings.duplicate_threshold,
+                           write_captions=p["pull_captions"], sort_by_orientation=False)
 
     def _aesthetic_note(self, *_a) -> None:
         if AestheticFilter.available():
@@ -324,7 +483,11 @@ class CollectPage(Gtk.Box):
         s.min_image_side, s.parallel_downloads = p["min_side"], p["parallel"]
         s.target_dim, s.extra_tags = p["target_dim"], p["extra_tags"].strip()
         self.state.save()
-        key, artist = p["source"], self.artist[p["source"]]
+        key = p["source"]
+        if key in BOARD_KEYS:
+            self._board_search(0)
+            return
+        artist = self.artist[key]
         simp = p["similarity"]
         sim = (SimilaritySpec(simp["backend"], simp["positive_dir"].strip(), simp["negative_dir"].strip(), simp["threshold"])
                if simp["enabled"] else SimilaritySpec())

@@ -68,7 +68,7 @@ def main(argv=None) -> int:
             application.set_accels_for_action("win.new-session", ["<Control>n"])
             application.set_accels_for_action("win.choose-library", ["<Control>o"])
             application.set_accels_for_action("win.quit", ["<Control>q"])
-            for i in range(1, 6):
+            for i in range(1, 5):
                 application.set_accels_for_action(f"win.page-{i}", [f"<Control>{i}"])
         win.present()
 

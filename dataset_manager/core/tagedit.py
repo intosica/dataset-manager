@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter
 
 from .captions import split_tags
@@ -89,8 +90,8 @@ def add(tags: list[str], new: list[str], at_start: bool = False) -> list[str]:
 
 
 def remove(tags: list[str], drop: list[str]) -> list[str]:
-    gone = {t.lower() for t in drop}
-    return [t for t in tags if t.lower() not in gone]
+    """Drop tags by name (case-insensitive); `tag*` and `*part*` wildcards work like the filter box."""
+    return [t for t in tags if not any(_term_hit(d.strip().lower(), [t.lower()]) for d in drop if d.strip())]
 
 
 def replace(tags: list[str], find: str, repl: str) -> list[str]:
@@ -98,6 +99,18 @@ def replace(tags: list[str], find: str, repl: str) -> list[str]:
     f = find.strip().lower()
     out = [repl.strip() if t.lower() == f else t for t in tags]
     return split_tags(", ".join(t for t in out if t))
+
+
+def replace_text(tags: list[str], find: str, repl: str) -> list[str]:
+    """Replace text *inside* tags (case-insensitive): "hair" -> "locks" turns "long hair" into "long locks"."""
+    if not find:
+        return list(tags)
+    pat = re.compile(re.escape(find), re.I)
+    return split_tags(", ".join(t for t in (pat.sub(lambda _m: repl, x).strip() for x in tags) if t))
+
+
+def keep_first(tags: list[str], n: int) -> list[str]:
+    return list(tags[:n]) if n > 0 else list(tags)
 
 
 def merge(old: list[str], new: list[str], mode: str) -> list[str] | None:
@@ -118,6 +131,9 @@ if __name__ == "__main__":
     assert remove(t, ["SOLO"]) == ["1girl", "long hair"]
     assert replace(t, "long hair", "short hair") == ["1girl", "Solo", "short hair"]
     assert replace(t, "solo", "") == ["1girl", "long hair"]
+    assert remove(t, ["long*"]) == ["1girl", "Solo"] and remove(t, ["*hai*", "1girl"]) == ["Solo"]
+    assert replace_text(t, "hair", "locks") == ["1girl", "Solo", "long locks"] and replace_text(t, "solo", "") == ["1girl", "long hair"]
+    assert keep_first(t, 2) == ["1girl", "Solo"]
     assert merge(t, ["a"], "skip") is None and merge([], ["a"], "skip") == ["a"]
     assert merge(["x"], ["a", "x"], "prepend") == ["a", "x"] and merge(["x"], ["a"], "merge") == ["x", "a"]
     print("tagedit ok")

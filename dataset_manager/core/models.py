@@ -37,9 +37,31 @@ MODELS = {
 }
 
 
-# ---- Phi-4 mini (GGUF, text only): rewrites captions. One choice = repo + file. ----
-PHI_DEFAULT = ("richardyoung/Phi-4-mini-instruct-heretic-GGUF", "Phi-4-mini-instruct-heretic-Q8_0.gguf")
-PHI_REPOS = {
+# ---- Text models (GGUF via llama.cpp, text only): rewrite captions. One choice = repo + file. ----
+# Any chat-tuned GGUF works the same way: llama.cpp reads the chat template from the file itself.
+LLM_DEFAULT = ("mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF", "Qwen2.5-1.5B-Instruct-uncensored.Q8_0.gguf")
+
+
+def _quants(stem: str, sizes: dict, sep: str = ".") -> dict:
+    return {q: (f"{stem}{sep}{q}.gguf", size) for q, size in sizes.items()}
+
+
+LLM_REPOS = {
+    "mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF": ("Qwen2.5 1.5B · uncensored", _quants(
+        "Qwen2.5-1.5B-Instruct-uncensored",
+        {"Q4_K_M": "1.1 GB", "Q5_K_M": "1.3 GB", "Q6_K": "1.5 GB", "Q8_0": "1.9 GB"})),
+    "Qwen/Qwen2.5-1.5B-Instruct-GGUF": ("Qwen2.5 1.5B · instruct", {
+        q.upper(): (f"qwen2.5-1.5b-instruct-{q}.gguf", size) for q, size in
+        {"q4_k_m": "1.1 GB", "q5_k_m": "1.3 GB", "q6_k": "1.5 GB", "q8_0": "1.9 GB"}.items()}),
+    "mradermacher/Qwen2.5-3B-Instruct-abliterated-GGUF": ("Qwen2.5 3B · abliterated", _quants(
+        "Qwen2.5-3B-Instruct-abliterated",
+        {"Q4_K_M": "1.9 GB", "Q5_K_M": "2.2 GB", "Q6_K": "2.5 GB", "Q8_0": "3.3 GB"})),
+    "Qwen/Qwen2.5-3B-Instruct-GGUF": ("Qwen2.5 3B · instruct", {
+        q.upper(): (f"qwen2.5-3b-instruct-{q}.gguf", size) for q, size in
+        {"q4_k_m": "2.1 GB", "q5_k_m": "2.4 GB", "q6_k": "2.8 GB", "q8_0": "3.6 GB"}.items()}),
+    "philbert440/Qwen3.8-27B-Uncensored-Cyber-GGUF": ("Qwen3.8 27B · uncensored (needs a big GPU)", _quants(
+        "Qwen3.8-27B-Uncensored-Cyber",
+        {"Q4_K_M": "19 GB", "Q5_K_M": "21 GB", "Q6_K": "24 GB", "Q8_0": "29 GB"}, sep="-")),
     "unsloth/Phi-4-mini-instruct-GGUF": ("Phi-4 mini · instruct", {
         "Q4_K_M": ("Phi-4-mini-instruct-Q4_K_M.gguf", "2.3 GB"),
         "Q5_K_M": ("Phi-4-mini-instruct-Q5_K_M.gguf", "2.7 GB"),
@@ -61,41 +83,44 @@ PHI_REPOS = {
 }
 
 
-def phi_choice(settings) -> tuple[str, str]:
-    """The chosen (repo, filename), falling back to heretic Q8_0."""
-    repo = getattr(settings, "phi_repo", "") or PHI_DEFAULT[0]
-    fname = getattr(settings, "phi_file", "") or PHI_DEFAULT[1]
-    if repo not in PHI_REPOS or fname not in [f for f, _s in PHI_REPOS[repo][1].values()]:
-        return PHI_DEFAULT
+def llm_choice(settings) -> tuple[str, str]:
+    """The chosen (repo, filename), falling back to Qwen2.5 1.5B uncensored Q8_0."""
+    repo = getattr(settings, "llm_repo", "") or LLM_DEFAULT[0]
+    fname = getattr(settings, "llm_file", "") or LLM_DEFAULT[1]
+    if repo not in LLM_REPOS or fname not in [f for f, _s in LLM_REPOS[repo][1].values()]:
+        return LLM_DEFAULT
     return repo, fname
 
 
-def phi_root(settings) -> Path:
-    p = paths.resolve(getattr(settings, "phi_path", ""))
+def llm_root(settings) -> Path:
+    p = paths.resolve(getattr(settings, "llm_path", ""))
     if p:
         p = Path(p)
         return p.parent if p.is_file() else p
-    return paths.data_dir() / "models" / "phi"
+    return paths.data_dir() / "models" / "llm"
 
 
-def phi_dir(settings) -> Path:
-    return phi_root(settings) / phi_choice(settings)[0].rsplit("/", 1)[-1]
+def llm_dir(settings) -> Path:
+    return llm_root(settings) / llm_choice(settings)[0].rsplit("/", 1)[-1]
 
 
-def find_phi(settings) -> str | None:
-    repo, fname = phi_choice(settings)
-    explicit = paths.resolve(getattr(settings, "phi_path", ""))
+def find_llm(settings) -> str | None:
+    repo, fname = llm_choice(settings)
+    explicit = paths.resolve(getattr(settings, "llm_path", ""))
     if explicit and Path(explicit).is_file():
         return explicit
-    for d in _walk(phi_root(settings), 2):
+    roots = [llm_root(settings)]
+    if not explicit:
+        roots.append(paths.data_dir() / "models" / "phi")     # where the Phi-4-only versions downloaded to
+    for d in (d for r in roots for d in _walk(r, 2)):
         if (d / fname).is_file():
             return str(d / fname)
     return None
 
 
-def download_phi(settings, ctx) -> bool:
-    repo, fname = phi_choice(settings)
-    dest = phi_dir(settings)
+def download_llm(settings, ctx) -> bool:
+    repo, fname = llm_choice(settings)
+    dest = llm_dir(settings)
     dest.mkdir(parents=True, exist_ok=True)
     out = dest / fname
     ctx.log(f"Downloading {fname} to {dest}")
@@ -110,8 +135,9 @@ def download_phi(settings, ctx) -> bool:
 
 def remove(key: str, settings) -> None:
     """Delete the files this app downloaded for a model; anything else the user keeps in that folder stays."""
-    if key == "phi":
-        dest, files = phi_dir(settings), [phi_choice(settings)[1]]
+    if key == "llm":
+        found = find_llm(settings)
+        dest, files = (Path(found).parent if found else llm_dir(settings)), [llm_choice(settings)[1]]
     elif key.startswith("florence:"):
         shutil.rmtree(florence_download_root(settings) / key.split(":", 1)[1], ignore_errors=True)
         return
@@ -383,8 +409,8 @@ def find_joycaption(settings) -> dict | None:
 
 def status(key: str, settings) -> str | None:
     """Path of the installed model, or None."""
-    if key == "phi":
-        return find_phi(settings)
+    if key == "llm":
+        return find_llm(settings)
     if key.startswith("florence:"):
         path = key.split(":", 1)[1]
         return path if os.path.isdir(path) else None

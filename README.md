@@ -47,7 +47,7 @@ The pages are in the header bar (Ctrl+1 … Ctrl+4); the left sidebar holds your
 | Collect | Image search (Bing, DuckDuckGo, Yahoo, Yandex, Pinterest, Internet Archive), imageboards with an in-app viewer (Danbooru, Gelbooru; Rule34.xxx after you switch on **Mature content** in Preferences), YGOPRODeck card art and card-art galleries (ArtofMTG, MTG Nexus) |
 | Library | Per-collection statistics and thumbnail previews; right-click a preview to move it to the Trash |
 | Maintenance | Optional steps for the **highlighted collection** (or the whole library if none is picked): dedupe (review the groups first, or trash copies automatically), sort, rename, JPEG, resize, low-quality flagging, captions |
-| Tag Tools | **Tag Editor**: browse a dataset, filter by tags, edit captions one by one or in batches (save one image or all of them; double-click the preview for a closer look), auto-tag (JTP Hydra 3.5, WD EVA02 Large v3) and caption with JoyCaption. Batch Edit has Add / Remove / Replace / Tidy / Rewrite tabs with a live “will change N captions” line and Undo. Selected thumbnails are outlined, Select all / Select none sit in the toolbar, and the arrows under the preview step through the filtered grid. **Phi-4 mini** can split a caption into paragraphs or tidy away repetition (text only, on this computer). **Imageboard Upload Helper**: turns tag lists into imageboard upload format. **Aesthetic Scorer**: click or drop any image to score it. **Quick Caption**: a throw-away one-image Tag Editor (tagging and captioning, nothing is saved) |
+| Tag Tools | **Tag Editor**: browse a dataset, filter by tags, edit captions one by one or in batches (save one image or all of them; double-click the preview for a closer look), auto-tag (JTP Hydra 3.5, WD EVA02 Large v3) and caption with JoyCaption. Batch Edit has Add / Remove / Replace / Tidy / Rewrite tabs with a live “will change N captions” line and Undo. Selected thumbnails are outlined, Select all / Select none sit in the toolbar, and the arrows under the preview step through the filtered grid. A **local text model** (Qwen2.5 by default) can split a caption into paragraphs or tidy away repetition (text only, on this computer). **Imageboard Upload Helper**: turns tag lists into imageboard upload format. **Aesthetic Scorer**: click or drop any image to score it. **Quick Caption**: a throw-away one-image Tag Editor (tagging and captioning, nothing is saved) |
 
 Right-click any image in the app to move it to the Trash (Library, Tag Editor), or to open it in the **Aesthetic Scorer** or **Quick Caption**.
 
@@ -76,27 +76,42 @@ app tells you so and suggests Gelbooru.
 Screenshots use a small demo library of [CC0](https://creativecommons.org/publicdomain/zero/1.0/) cat photographs from
 Wikimedia Commons.
 
-### Phi-4 mini: paragraphs and tidying
+### Text model: paragraphs and tidying
 
-The Tag Editor can rewrite a caption with [Phi-4 mini](https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF) on this
-computer, through llama.cpp.
+The Tag Editor can rewrite a caption with a small local text model (any instruct GGUF, run through llama.cpp on this
+computer). The default is [Qwen2.5 1.5B Instruct uncensored](https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF)
+at Q8_0 (1.9 GB): fast on a CPU, and the prompts are tuned for it.
 
-<p align="center"><img src="docs/screenshots/tag-editor-rewrite.png" alt="Tag Editor: a paragraph caption with the Rewrite tab of Batch Edit" width="1000"></p>
+<p align="center"><img src="docs/screenshots/tag-editor-rewrite.png" alt="Tag Editor: a cat caption split into paragraphs by the text model, with the Rewrite tab of Batch Edit" width="1000"></p>
 
-* **Split Paragraphs** starts a new paragraph whenever the subject, setting or action changes. Captions saved that way
-  keep their blank lines in the `.txt` sidecar (`first paragraph↵↵second paragraph`), so they no longer get squeezed
-  back into one line.
-* **Tidy Text** removes repetition and redundant wording while keeping every detail.
+* **Split Paragraphs** groups the caption's sentences into subject → setting → style paragraphs. The model only
+  labels each sentence; the words themselves are never rewritten, so nothing gets lost or invented. Captions saved
+  that way keep their blank lines in the `.txt` sidecar (`first paragraph↵↵second paragraph`).
+* **Tidy Text** rewrites the caption as one paragraph without repetition, keeping every object, colour, number and
+  action.
+* Tag lists (no sentences) are left alone by both; Batch Edit → **Tidy** is the tool for those.
 * One image: the two buttons under the caption. Every selected image: **Batch Edit → Rewrite**.
 * A rewrite is staged like any other edit. Nothing is written until you press **Save Tags** / **Save All Tags**, and
   **Undo Last Batch Edit** takes it back.
 
-Preferences → Models → **Phi-4 mini** picks the model — heretic (default), abliterated, or Microsoft's original
-instruct — and the size, Q4_K_M (2.3 GB) to Q8_0 (3.8 GB), then downloads it from Hugging Face. It needs
-`llama-cpp-python` (Preferences → System; CPU build, no GPU required). The model never sees the image: the caption is
-the only input.
+<p align="center"><img src="docs/screenshots/preferences-text-model.png" alt="Preferences → Models: text model picker with model, size and download" width="640"></p>
 
-Every download in Preferences has a **Remove** button — taggers, JoyCaption, Florence 2, Phi-4 mini and the cached
+Preferences → Models → **Text model** picks the model and the size (Q4_K_M … Q8_0), then downloads it from Hugging
+Face:
+
+| Model | Q8_0 | Notes |
+|---|---|---|
+| [Qwen2.5 1.5B · uncensored](https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF) | 1.9 GB | default, tested |
+| [Qwen2.5 1.5B · instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) | 1.9 GB | Qwen's original |
+| [Qwen2.5 3B · abliterated](https://huggingface.co/mradermacher/Qwen2.5-3B-Instruct-abliterated-GGUF) | 3.3 GB | slower, more careful |
+| [Qwen2.5 3B · instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF) | 3.6 GB | Qwen's original |
+| [Qwen3.8 27B · uncensored](https://huggingface.co/philbert440/Qwen3.8-27B-Uncensored-Cyber-GGUF) | 29 GB | untested; needs a big GPU and a recent llama.cpp |
+| Phi-4 mini · instruct / abliterated / heretic | 3.8 GB | the earlier default |
+
+It needs `llama-cpp-python` (Preferences → System; CPU build, no GPU required). The model never sees the image: the
+caption is the only input. On a 12-core CPU a split takes 2–7 s and a tidy 5–12 s with the 1.5B Q8_0.
+
+Every download in Preferences has a **Remove** button — taggers, JoyCaption, Florence 2, the text model and the cached
 CLIP / similarity / aesthetic models — so a model you no longer use does not stay on disk.
 
 ### Sessions
@@ -160,6 +175,6 @@ caption template; changes apply immediately, and every downloaded model can be r
 
 Settings and sessions `~/.config/dataset-manager/`, cache `~/.cache/dataset-manager/`, browser profile
 `~/.local/share/dataset-manager/` (inside `~/.var/app/…` for the flatpak); downloaded models go to its `models/`
-folder (Phi-4 mini: `models/phi/<repo>/`). Create an empty file named `portable` in
+folder (text models: `models/llm/<repo>/`). Create an empty file named `portable` in
 this folder to keep everything in `./data` instead. Upscale models are searched in `./models`, `./upscaler` and any
 folders added in Preferences. The command line accepts `--library PATH`.

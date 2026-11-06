@@ -34,9 +34,10 @@ class Settings:
     wd_path: str = ""
     joycaption_path: str = ""
     florence_path: str = ""         # blank = auto-detect ComfyUI models/LLM
-    phi_path: str = ""              # blank = <app data>/models/phi; the chosen GGUF's folder (or file)
-    phi_repo: str = ""               # blank = heretic; see models.PHI_REPOS
-    phi_file: str = ""               # blank = heretic Q8_0
+    # caption-rewriting text model (GGUF); blank = <app data>/models/llm, Qwen2.5 1.5B uncensored Q8_0
+    llm_path: str = ""               # the chosen GGUF's folder (or file)
+    llm_repo: str = ""               # see models.LLM_REPOS
+    llm_file: str = ""
     hf_cache_dir: str = ""            # blank = app cache; where CLIP / aesthetic / similarity models go
     tag_threshold: float = 0.0       # 0 = automatic (Hydra: calibrated per tag · WD: 0.35)
     tag_editor_dir: str = ""          # last folder opened in the Tag Editor
@@ -77,6 +78,9 @@ class Settings:
             with open(cls.file(), encoding="utf-8") as f:
                 data = json.load(f)
             known = {f.name for f in fields(cls)}
+            for old in ("path", "repo", "file"):          # the Phi-4-only versions called these phi_*
+                if f"phi_{old}" in data:
+                    data.setdefault(f"llm_{old}", data[f"phi_{old}"])
             for k, v in data.items():
                 if k in known:
                     setattr(s, k, v)

@@ -271,34 +271,35 @@ class PreferencesDialog(Adw.PreferencesDialog):
         tag.add(self.florence_note)
         page.add(tag)
 
-        # ---- Phi-4 mini: caption rewriting ----
-        self.phi_group = Adw.PreferencesGroup(
-            title="Phi-4 mini (rewrite captions)",
-            description="A small text model that splits captions into paragraphs or trims repetition. It runs on this "
+        # ---- text model: caption rewriting ----
+        self.llm_group = Adw.PreferencesGroup(
+            title="Text model (rewrite captions)",
+            description="A text model that splits captions into paragraphs or trims repetition. It runs on this "
                         "computer and never changes a caption by itself — you still press Save Tags in the Tag Editor. "
-                        "Heretic and abliterated are uncensored builds; instruct is Microsoft's original.")
-        self.phi_row = PathRow("Model folder", placeholder=str(models.phi_root(self.state.settings)))
-        self.phi_row.set_text(self.state.settings.phi_path)
-        _apply_row(self.phi_row, self._phi_path_changed)
-        self.phi_group.add(self.phi_row)
-        self._phi_sync = True                 # guard while the combos are being filled
-        self._phi_repos = list(models.PHI_REPOS)
-        self.phi_model = Adw.ComboRow(title="Model")
-        self.phi_model.set_model(Gtk.StringList.new([models.PHI_REPOS[r][0].split(" · ")[-1] for r in self._phi_repos]))
-        self.phi_model.connect("notify::selected", lambda *_a: self._phi_changed())
-        self.phi_group.add(self.phi_model)
-        self.phi_quant = Adw.ComboRow(title="Size")
-        self.phi_quant.set_subtitle("Q8_0 is the most faithful (3.8 GB); Q4_K_M is the smallest (2.3 GB)")
-        self.phi_quant.connect("notify::selected", lambda *_a: self._phi_changed())
-        self.phi_group.add(self.phi_quant)
-        self._phi_sync = False
-        self.phi_note = NoteRow()
-        self.phi_group.add(self.phi_note)
-        self.phi_action = Adw.ActionRow(title="Download", subtitle="From Hugging Face")
-        self.phi_btns = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-        self.phi_action.add_suffix(self.phi_btns)
-        self.phi_group.add(self.phi_action)
-        page.add(self.phi_group)
+                        "Uncensored, abliterated and heretic are de-refused builds; instruct is the maker's original. "
+                        "Qwen2.5 1.5B is the fast default; 3B is more careful; the 27B needs a large GPU.")
+        self.llm_row = PathRow("Model folder", placeholder=str(models.llm_root(self.state.settings)))
+        self.llm_row.set_text(self.state.settings.llm_path)
+        _apply_row(self.llm_row, self._llm_path_changed)
+        self.llm_group.add(self.llm_row)
+        self._llm_sync = True                 # guard while the combos are being filled
+        self._llm_repos = list(models.LLM_REPOS)
+        self.llm_model = Adw.ComboRow(title="Model")
+        self.llm_model.set_model(Gtk.StringList.new([models.LLM_REPOS[r][0] for r in self._llm_repos]))
+        self.llm_model.connect("notify::selected", lambda *_a: self._llm_changed())
+        self.llm_group.add(self.llm_model)
+        self.llm_quant = Adw.ComboRow(title="Size")
+        self.llm_quant.set_subtitle("Q8_0 is the most faithful; Q4_K_M is the smallest")
+        self.llm_quant.connect("notify::selected", lambda *_a: self._llm_changed())
+        self.llm_group.add(self.llm_quant)
+        self._llm_sync = False
+        self.llm_note = NoteRow()
+        self.llm_group.add(self.llm_note)
+        self.llm_action = Adw.ActionRow(title="Download", subtitle="From Hugging Face")
+        self.llm_btns = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        self.llm_action.add_suffix(self.llm_btns)
+        self.llm_group.add(self.llm_action)
+        page.add(self.llm_group)
 
         self.dl_group = Adw.PreferencesGroup(title="Downloads", description="From Hugging Face; interrupted downloads resume.")
         page.add(self.dl_group)
@@ -340,63 +341,64 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self.state.save()
         self._fill_models()
 
-    # ---- Phi-4 mini ----
-    def _phi_path_changed(self) -> None:
-        self.state.settings.phi_path = self.phi_row.path()
+    # ---- text model ----
+    def _llm_path_changed(self) -> None:
+        self.state.settings.llm_path = self.llm_row.path()
         self.state.save()
         self._fill_models()
 
-    def _phi_changed(self) -> None:
-        if self._phi_sync:
+    def _llm_changed(self) -> None:
+        if self._llm_sync:
             return
         s = self.state.settings
-        repo = self._phi_repos[self.phi_model.get_selected()]
-        quants = list(models.PHI_REPOS[repo][1])
-        s.phi_repo = repo
-        s.phi_file = models.PHI_REPOS[repo][1][quants[max(0, self.phi_quant.get_selected())]][0]
+        repo = self._llm_repos[self.llm_model.get_selected()]
+        quants = list(models.LLM_REPOS[repo][1])
+        s.llm_repo = repo
+        s.llm_file = models.LLM_REPOS[repo][1][quants[max(0, self.llm_quant.get_selected())]][0]
         self.state.save()
-        self._fill_phi()
+        self._fill_llm()
         self._fill_models()
 
-    def _fill_phi(self, found: str | None = None) -> None:
+    def _fill_llm(self, found: str | None = None) -> None:
         s = self.state.settings
-        repo, fname = models.phi_choice(s)
-        quants = list(models.PHI_REPOS[repo][1])
-        self._phi_sync = True
+        repo, fname = models.llm_choice(s)
+        quants = list(models.LLM_REPOS[repo][1])
+        self._llm_sync = True
         try:
-            self.phi_model.set_selected(self._phi_repos.index(repo))
-            self.phi_quant.set_model(Gtk.StringList.new(quants))
-            self.phi_quant.set_selected(quants.index(fname) if fname in quants else len(quants) - 1)
+            self.llm_model.set_selected(self._llm_repos.index(repo))
+            self.llm_quant.set_model(Gtk.StringList.new(quants))
+            files = [models.LLM_REPOS[repo][1][q][0] for q in quants]
+            self.llm_quant.set_selected(files.index(fname) if fname in files else len(quants) - 1)
         finally:
-            self._phi_sync = False
-        while (child := self.phi_btns.get_first_child()) is not None:
-            self.phi_btns.remove(child)
+            self._llm_sync = False
+        while (child := self.llm_btns.get_first_child()) is not None:
+            self.llm_btns.remove(child)
         ready = capabilities.has("llama_cpp")
-        label, sizes = models.PHI_REPOS[repo]
+        label, sizes = models.LLM_REPOS[repo]
         size = next((s for f, s in sizes.values() if f == fname), "")
-        self.phi_action.set_subtitle(f"{fname} · {size}" if size else fname)
+        self.llm_action.set_subtitle(f"{fname} · {size}" if size else fname)
         if found:
-            self.phi_action.set_title(label)
+            self.llm_action.set_title(label)
             b = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER, css_classes=["pill"])
-            b.connect("clicked", lambda _b: self._remove(model="phi", label=fname))
-            self.phi_btns.append(b)
+            b.connect("clicked", lambda _b: self._remove(model="llm", label=fname))
+            self.llm_btns.append(b)
         else:
-            self.phi_action.set_title("Download")
+            self.llm_action.set_title("Download")
             b = Gtk.Button(label="Download", valign=Gtk.Align.CENTER, css_classes=["pill"])
-            b.connect("clicked", lambda _b: self._download_phi())
+            b.connect("clicked", lambda _b: self._download_llm())
             b.set_sensitive(ready)
-            self.phi_btns.append(b)
+            self.llm_btns.append(b)
         if not ready:
-            self.phi_note.set_text("Needs llama-cpp-python: Preferences → System.")
+            self.llm_note.set_text("Needs llama-cpp-python: Preferences → System.")
         elif found:
-            self.phi_note.set_text(f"Ready: {found}")
+            self.llm_note.set_text(f"Ready: {found}")
         else:
-            self.phi_note.set_text(f"Not downloaded in {models.phi_root(s)}.")
+            self.llm_note.set_text(f"Not downloaded in {models.llm_root(s)}.")
 
-    def _download_phi(self) -> None:
+    def _download_llm(self) -> None:
         s = self.state.settings
-        JobDialog(f"Download {models.phi_choice(s)[1]}", str(models.phi_dir(s)),
-                  lambda ctx: models.download_phi(s, ctx), lambda _ok: self._fill_models()).present(self)
+        JobDialog(f"Download {models.llm_choice(s)[1]}", str(models.llm_dir(s)),
+                  lambda ctx: models.download_llm(s, ctx), lambda _ok: self._fill_models()).present(self)
 
     def _remove(self, model: str = "", repo: str = "", label: str = "") -> None:
         """Delete one downloaded model after a confirm; the model file may be large, so never silent."""
@@ -444,7 +446,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             found = {k: models.status(k, s) for k in models.MODELS}
             found["joycaption_path"] = j and (j.get("model") or j.get("path"))
             found["florence"] = models.find_florence_models(s)
-            found["phi"] = models.find_phi(s)
+            found["llm"] = models.find_llm(s)
             return found
         self._models_tok = tok = getattr(self, "_models_tok", 0) + 1
         run_background(look, lambda f: self._fill_models_now(f) if tok == self._models_tok else None)
@@ -455,7 +457,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             found = have_all.get("joycaption_path") if key == "joycaption" else have_all.get(key)
             note.set_text(f"Found: {found}" if found else f"Not found in {models.location(key, s)}")
         florence = have_all.get("florence", [])
-        self._fill_phi(have_all.get("phi"))
+        self._fill_llm(have_all.get("llm"))
         self.florence_group.set_description(
             "The same files ComfyUI-Florence2 uses. They are saved into the ComfyUI models/LLM folder "
             f"({models.florence_download_root(self.state.settings)}).")

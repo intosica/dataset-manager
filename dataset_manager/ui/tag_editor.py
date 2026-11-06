@@ -20,7 +20,7 @@ TAG_MODES = [("merge", "Add missing tags"), ("prepend", "Put new tags first"), (
              ("skip", "Skip images that have tags")]
 JOY_MODES = [("replace", "Replace the caption"), ("merge", "Append to the caption"),
              ("skip", "Skip images that have captions")]
-_PHI_MISSING = ("Phi-4 mini is not ready: download a GGUF in Preferences → Models and install llama-cpp-python in "
+_LLM_MISSING = ("No text model is ready: download one in Preferences → Models and install llama-cpp-python in "
                 "Preferences → System.")
 _pool = ThreadPoolExecutor(max_workers=min(6, os.cpu_count() or 2), thread_name_prefix="thumbs")
 
@@ -62,7 +62,7 @@ class TagEditor(Gtk.Box):
         self._cells: dict = {}                         # image -> overlay of its bound grid cell
         self._para: set[str] = set()                   # captions written as paragraphs (blank line between them)
         self._disk_para: set[str] = set()
-        self.phi_status = models.find_phi(state.settings) or ""       # cheap: one small folder
+        self.llm_status = models.find_llm(state.settings) or ""       # cheap: one small folder
 
         # ---- toolbar ----
         bar = Gtk.Box(spacing=8, margin_start=12, margin_end=12, margin_top=8, margin_bottom=8)
@@ -119,7 +119,7 @@ class TagEditor(Gtk.Box):
         side.append(self._tags_group())
         side.append(self._autotag_group())
         side.append(self._joy_group())
-        side.append(self._phi_group())
+        side.append(self._llm_group())
         side_scroll = self.side_scroll = Gtk.ScrolledWindow(child=Adw.Clamp(child=side, maximum_size=520), hscrollbar_policy=Gtk.PolicyType.NEVER,
                                          vexpand=True)
         self.panel = TaskPanel(min_height=90)
@@ -275,18 +275,18 @@ class TagEditor(Gtk.Box):
             "Sort every caption alphabetically, drop repeated tags, or cut captions down to their first tags "
             "(useful for trainers with a token limit).")
         rw = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin_top=8)
-        rw.append(hint("Phi-4 mini rewrites the selected captions on this computer — it never sees the images. "
+        rw.append(hint("The text model rewrites the selected captions on this computer — it never sees the images. "
                        "Nothing is saved: review the result, then press Save All Tags."))
-        self.phi_btns = []
+        self.llm_btns = []
         rw_btns = Gtk.Box(spacing=6, halign=Gtk.Align.END)
         for task, label in (("paragraphs", "Split Paragraphs"), ("tidy", "Tidy Text")):
             b = Gtk.Button(label=label)
-            b.connect("clicked", lambda _b, t=task: self._phi_batch(t))
-            self.phi_btns.append(b)
+            b.connect("clicked", lambda _b, t=task: self._llm_batch(t))
+            self.llm_btns.append(b)
             rw_btns.append(b)
         rw.append(rw_btns)
-        self.phi_batch_note = hint()
-        rw.append(self.phi_batch_note)
+        self.llm_batch_note = hint()
+        rw.append(self.llm_batch_note)
         self.batch_stack.add_titled(rw, "rewrite", "Rewrite")
         switcher = Gtk.StackSwitcher(stack=self.batch_stack, halign=Gtk.Align.CENTER)
         self.batch_stack.connect("notify::visible-child-name", lambda *_a: self._batch_preview())
@@ -391,25 +391,25 @@ class TagEditor(Gtk.Box):
         self.state.settings_changed.connect(self._model_status)
         return g
 
-    def _phi_group(self) -> Gtk.Widget:
+    def _llm_group(self) -> Gtk.Widget:
         g = Adw.PreferencesGroup(
-            title="Rewrite with Phi-4 mini",
+            title="Rewrite with a text model",
             description="Text only — the model never sees the image. Splits a caption into paragraphs or trims "
                         "repetition. Nothing is saved until you press Save Tags.")
-        self.phi_note = NoteRow()
-        self.phi_note.set_text(_PHI_MISSING)
-        self.phi_para_btn = Gtk.Button(label="Split Paragraphs",
+        self.llm_note = NoteRow()
+        self.llm_note.set_text(_LLM_MISSING)
+        self.llm_para_btn = Gtk.Button(label="Split Paragraphs",
                                        tooltip_text="Break this caption at changes of subject, setting, or action")
-        self.phi_tidy_btn = Gtk.Button(label="Tidy Text",
+        self.llm_tidy_btn = Gtk.Button(label="Tidy Text",
                                        tooltip_text="Remove repetition and redundant wording, keeping every detail")
-        self.phi_para_btn.connect("clicked", lambda _b: self._phi_one("paragraphs"))
-        self.phi_tidy_btn.connect("clicked", lambda _b: self._phi_one("tidy"))
+        self.llm_para_btn.connect("clicked", lambda _b: self._llm_one("paragraphs"))
+        self.llm_tidy_btn.connect("clicked", lambda _b: self._llm_one("tidy"))
         btns = Gtk.Box(spacing=6, halign=Gtk.Align.START, margin_top=6)
-        for b in (self.phi_para_btn, self.phi_tidy_btn):
+        for b in (self.llm_para_btn, self.llm_tidy_btn):
             btns.append(b)
-        g.add(self.phi_note)
+        g.add(self.llm_note)
         g.add(btns)
-        self._update_phi_ui()
+        self._update_llm_ui()
         return g
 
     # ================= grid cells =================
@@ -609,7 +609,7 @@ class TagEditor(Gtk.Box):
         for b in (self.tag_btn, self.joy_btn):
             b.set_sensitive(n > 0 and not busy)
         self.trash_btn.set_sensitive(bool(sel) and not busy)
-        self._update_phi_ui()
+        self._update_llm_ui()
         self._fill_tags()
 
     def _show_caption(self) -> None:
@@ -865,11 +865,11 @@ class TagEditor(Gtk.Box):
             c = len(self._batch_changes(op))
             self.batch_preview.set_text(f"Will change {c:,} of {n:,} captions." if c else
                                         f"Nothing to change in these {n:,} captions.")
-        ready = bool(self.phi_status)
-        for b in getattr(self, "phi_btns", []):
+        ready = bool(self.llm_status)
+        for b in getattr(self, "llm_btns", []):
             b.set_sensitive(n > 0 and ready and not self.panel.busy)
-        if getattr(self, "phi_batch_note", None) is not None:
-            self.phi_batch_note.set_text("" if ready else _PHI_MISSING)
+        if getattr(self, "llm_batch_note", None) is not None:
+            self.llm_batch_note.set_text("" if ready else _LLM_MISSING)
 
     def _batch(self, op: str) -> None:
         self.save_current()
@@ -896,20 +896,20 @@ class TagEditor(Gtk.Box):
             self._show_caption()
             self._toast("Undone.")
 
-    # ================= Phi-4 mini =================
-    def _update_phi_ui(self) -> None:
-        ready = bool(self.phi_status)
+    # ================= text model (caption rewriting) =================
+    def _update_llm_ui(self) -> None:
+        ready = bool(self.llm_status)
         busy = bool(self.panel.busy) if hasattr(self, "panel") else True
-        for b in (getattr(self, "phi_para_btn", None), getattr(self, "phi_tidy_btn", None)):
+        for b in (getattr(self, "llm_para_btn", None), getattr(self, "llm_tidy_btn", None)):
             if b is not None:
                 b.set_sensitive(bool(self.current) and ready and not busy)
-        note = getattr(self, "phi_note", None)
+        note = getattr(self, "llm_note", None)
         if note is not None:
-            note.set_text("Model: " + self.phi_status if ready else _PHI_MISSING)
+            note.set_text("Model: " + self.llm_status if ready else _LLM_MISSING)
         if hasattr(self, "batch_stack"):
             self._batch_preview()
 
-    def _phi_one(self, task: str) -> None:
+    def _llm_one(self, task: str) -> None:
         """Rewrite the open caption; it stays staged until the user presses Save Tags."""
         self.save_current()
         p = self.current
@@ -921,17 +921,17 @@ class TagEditor(Gtk.Box):
             return
         old, old_para = list(self.captions.get(p, [])), p in self._para
         self.panel.run(lambda ctx: textllm.rewrite(self.state.settings, text, task, ctx),
-                       lambda new: self._phi_done(p, new, old, old_para), name="Rewriting with Phi-4")
+                       lambda new: self._llm_done(p, new, old, old_para), name="Rewriting captions")
 
-    def _phi_done(self, p: str, new: str, old: list, old_para: bool) -> None:
+    def _llm_done(self, p: str, new: str, old: list, old_para: bool) -> None:
         if self.folder and not os.path.exists(p):
             return
         tags, para = tagedit.split_caption(new)
         if not tags:
-            self._toast("Phi-4 returned an empty caption; nothing changed.")
+            self._toast("The text model returned an empty caption; nothing changed.")
             return
         if tags == old:
-            self._toast("Phi-4 changed nothing.")
+            self._toast("The text model changed nothing.")
             return
         self._undo = {p: old}
         self.undo_btn.set_sensitive(True)
@@ -942,7 +942,7 @@ class TagEditor(Gtk.Box):
         self.panel.log(f"{os.path.basename(p)}: {new[:400]}")
         self._toast("Rewritten — press Save Tags to write it.")
 
-    def _phi_batch(self, task: str) -> None:
+    def _llm_batch(self, task: str) -> None:
         """Rewrite every selected caption; results are staged for Save All Tags, never written here."""
         self.save_current()
         files, folder = self.targets(), self.folder
@@ -971,7 +971,7 @@ class TagEditor(Gtk.Box):
 
         def finished(found):
             if self.folder != folder or not found:
-                self.panel.log("Phi-4 did not change anything.")
+                self.panel.log("The text model did not change anything.")
                 return
             self._undo = {f: old[f] for f in found}
             self.undo_btn.set_sensitive(True)
@@ -982,7 +982,7 @@ class TagEditor(Gtk.Box):
             self._fill_tags()
             self.panel.log(f"Rewrote {len(found):,} captions — press Save All Tags to write them.")
 
-        self.panel.run(job, finished, name="Rewriting with Phi-4")
+        self.panel.run(job, finished, name="Rewriting captions")
 
     def _trash_selected(self) -> None:
         sel = self.selected()
@@ -1079,7 +1079,7 @@ class TagEditor(Gtk.Box):
         s, key = self.state.settings, self.state.settings.tagger
         self._status_tok = tok = getattr(self, "_status_tok", 0) + 1
         run_background(lambda: (tok, key, models.status(key, s), models.find_florence_models(s),
-                                models.find_joycaption(s), models.find_phi(s)), self._show_status)
+                                models.find_joycaption(s), models.find_llm(s)), self._show_status)
 
     def _sync_taggers(self, florence: list) -> None:
         pairs = list(TAGGERS) + [
@@ -1101,11 +1101,11 @@ class TagEditor(Gtk.Box):
             self._syncing_taggers = False
 
     def _show_status(self, r) -> None:
-        tok, key, found, florence, j, phi = r
+        tok, key, found, florence, j, llm = r
         if tok != self._status_tok:
             return
-        self.phi_status = phi or ""
-        self._update_phi_ui()
+        self.llm_status = llm or ""
+        self._update_llm_ui()
         self._sync_taggers(florence)
         s = self.state.settings
         is_florence = key.startswith("florence:")

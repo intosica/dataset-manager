@@ -394,16 +394,17 @@ class TagEditor(Gtk.Box):
     def _llm_group(self) -> Gtk.Widget:
         g = Adw.PreferencesGroup(
             title="Rewrite with a text model",
-            description="Text only — the model never sees the image. Splits a caption into paragraphs or trims "
-                        "repetition. Nothing is saved until you press Save Tags.")
+            description="Text only — the model never sees the image. Splits captions into paragraphs or trims "
+                        "repetition for the open image, every selected image, or all shown images when none is "
+                        "selected. Nothing is saved until you press Save Tags / Save All Tags.")
         self.llm_note = NoteRow()
         self.llm_note.set_text(_LLM_MISSING)
         self.llm_para_btn = Gtk.Button(label="Split Paragraphs",
                                        tooltip_text="Break this caption at changes of subject, setting, or action")
         self.llm_tidy_btn = Gtk.Button(label="Tidy Text",
                                        tooltip_text="Remove repetition and redundant wording, keeping every detail")
-        self.llm_para_btn.connect("clicked", lambda _b: self._llm_one("paragraphs"))
-        self.llm_tidy_btn.connect("clicked", lambda _b: self._llm_one("tidy"))
+        self.llm_para_btn.connect("clicked", lambda _b: self._llm_run("paragraphs"))
+        self.llm_tidy_btn.connect("clicked", lambda _b: self._llm_run("tidy"))
         btns = Gtk.Box(spacing=6, halign=Gtk.Align.START, margin_top=6)
         for b in (self.llm_para_btn, self.llm_tidy_btn):
             btns.append(b)
@@ -900,14 +901,21 @@ class TagEditor(Gtk.Box):
     def _update_llm_ui(self) -> None:
         ready = bool(self.llm_status)
         busy = bool(self.panel.busy) if hasattr(self, "panel") else True
-        for b in (getattr(self, "llm_para_btn", None), getattr(self, "llm_tidy_btn", None)):
+        n = len(self.targets()) if hasattr(self, "sel") else 0
+        for b, label in ((getattr(self, "llm_para_btn", None), "Split Paragraphs"),
+                         (getattr(self, "llm_tidy_btn", None), "Tidy Text")):
             if b is not None:
-                b.set_sensitive(bool(self.current) and ready and not busy)
+                b.set_label(f"{label} ({n:,} images)" if n > 1 else label)
+                b.set_sensitive(n > 0 and ready and not busy)
         note = getattr(self, "llm_note", None)
         if note is not None:
             note.set_text("Model: " + self.llm_status if ready else _LLM_MISSING)
         if hasattr(self, "batch_stack"):
             self._batch_preview()
+
+    def _llm_run(self, task: str) -> None:
+        """One open image keeps the quick path; several selected (or none selected = all shown) run as a batch."""
+        (self._llm_one if self.current else self._llm_batch)(task)
 
     def _llm_one(self, task: str) -> None:
         """Rewrite the open caption; it stays staged until the user presses Save Tags."""

@@ -29,7 +29,7 @@ TIDY = ("You tidy image captions. Rewrite the caption as one tidy paragraph: rem
         "of the same thing and chains of 'and'. Keep every distinct detail exactly as stated: every object, person, "
         "animal, colour, number, position and action, attached to the same thing it was attached to. Never add "
         "anything that is not in the caption: no new objects, no opinions, no mood words. Reply with the tidy "
-        "caption only.")
+        "caption only. A caption with nothing repeated stays almost exactly as it is.")
 TIDY_EXAMPLES = (
     ("A man is standing on a beach, and the man is wearing a red shirt, and the man has a red shirt with white "
      "stripes. The beach is sandy. There is a dog next to the man, a small brown dog, and the dog is wet. Two boats "
@@ -39,6 +39,9 @@ TIDY_EXAMPLES = (
     ("Three apples are on a table. The apples are red, three red apples, and one green pear is next to them. The "
      "table is wooden and the table is old. A lamp is on the left.",
      "Three red apples and one green pear sit on an old wooden table. A lamp is on the left."),
+    ("A grey rabbit sits in a box. The rabbit has long ears. The box is on a porch next to a garden. The light is "
+     "soft.",
+     "A grey rabbit with long ears sits in a box. The box is on a porch next to a garden. The light is soft."),
 )
 
 TASKS = ("paragraphs", "tidy")

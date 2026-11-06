@@ -90,7 +90,8 @@ at Q8_0 (1.9 GB): fast on a CPU, and the prompts are tuned for it.
 * **Tidy Text** rewrites the caption as one paragraph without repetition, keeping every object, colour, number and
   action.
 * Tag lists (no sentences) are left alone by both; Batch Edit → **Tidy** is the tool for those.
-* One image: the two buttons under the caption. Every selected image: **Batch Edit → Rewrite**.
+* The two buttons under the caption work on the open image, on every selected image, or on all shown images when none
+  is selected (the label shows the count); **Batch Edit → Rewrite** has the same two.
 * A rewrite is staged like any other edit. Nothing is written until you press **Save Tags** / **Save All Tags**, and
   **Undo Last Batch Edit** takes it back.
 
